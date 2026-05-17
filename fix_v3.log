@@ -1,0 +1,69 @@
+=========================================================
+Revision 10 — Cursor off-by-one + Enter-on-empty-file
+=========================================================
+
+[1] src/render.c — gutter visual width mismatch (cursor off by 1)
+
+The line-number format "\x1b[36m%*d \x1b[39m" produces
+gutter_width + 1 visible columns (number field + trailing space),
+but all positioning code used gutter_width alone.
+
+Fixed 4 locations:
+  - editor_scroll:   screen_cols - gutter_width
+                     → screen_cols - gutter_width - 1
+  - available_cols:  screen_cols - gutter_width
+                     → screen_cols - gutter_width - 1
+  - tilde width:     gutter_width - 1 → gutter_width
+  - cursor position: cursor_x + 1 + gutter_width
+                     → cursor_x + gutter_width + 2
+
+[2] src/editor.c — editor_insert_newline: cursor past EOF on empty file
+
+Before:
+  if (cursor_x == 0) {
+      insert_raw(ec, cursor_y, "", 0);
+      ec->cursor_y++;  // unconditional — broken when num_rows was 0
+  }
+
+After:
+  if (cursor_x == 0) {
+      insert_raw(ec, cursor_y, "", 0);
+      if (ec->cursor_y < ec->num_rows - 1)  // content was pushed down
+          ec->cursor_y++;
+  }
+
+Why: Opening an empty file (num_rows=0) and pressing Enter created
+row[0] but cursor_y++ left cursor at cursor_y=1 >= num_rows=1.
+This caused:
+  - second display line to render as "~" (no row data)
+  - Backspace to silently return (cursor_y >= num_rows)
+  - typing to belatedly create the row, fixing both
+The fix only advances the cursor when content is actually pushed down.
+
+Affected Files:
+  src/render.c  —  4 lines changed
+  src/editor.c  —  3 lines changed
+
+=========================================================
+Revision 11 — Per-file-type tab_stop
+=========================================================
+
+[1] include/common.h
+  - Added: int tab_stop to struct EditorSyntax (tab width per language)
+  - Added: int tab_stop to EditorConfig (active tab width)
+  - Removed: unused KILO_TAB_STOP 8 macro
+  - Relocated: EDITOR_TAB_STOP 4 to constants section (default fallback)
+
+[2] src/editor.c
+  - Added: ec->tab_stop = EDITOR_TAB_STOP; in editor_init
+
+[3] src/syntax.c
+  - Added: tab_stop = 4 to the C/C++ syntax database entry
+  - Updated: editor_select_syntax_highlight now sets ec->tab_stop =
+    s->tab_stop when a syntax matches, falls back to EDITOR_TAB_STOP
+    when no match is found
+
+Affected Files:
+  include/common.h  —  5 lines changed
+  src/editor.c      —  1 line added
+  src/syntax.c      —  3 lines changed

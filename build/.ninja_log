@@ -1,0 +1,19 @@
+# ninja log v7
+55	758	8007098191213210	CMakeFiles/TextEditor.dir/src/syntax.c.obj	a6c6c99a58ce3af0
+64	759	8007098191312953	CMakeFiles/TextEditor.dir/src/common.c.obj	deb0a122f5c3742a
+45	755	8007098191121698	CMakeFiles/TextEditor.dir/src/fileio.c.obj	83044389223d80e2
+11	753	8007098190787625	CMakeFiles/TextEditor.dir/src/terminal.c.obj	7caf56a6f6d9286f
+4	717	8007098190712581	CMakeFiles/TextEditor.dir/src/Main/main.c.obj	42757c85595ae5c1
+35	763	8007098191020547	CMakeFiles/TextEditor.dir/src/input.c.obj	9d1bdd231803a0e6
+19	729	8007098190847717	CMakeFiles/TextEditor.dir/src/render.c.obj	abfbfbb24be159ab
+26	765	8007098190927869	CMakeFiles/TextEditor.dir/src/editor.c.obj	afaf5574e221e157
+765	894	8007098198287481	TextEditor.exe	8e74a174f23aacaf
+3	755	8007116913032168	CMakeFiles/TextEditor.dir/src/Main/main.c.obj	42757c85595ae5c1
+10	770	8007116913124303	CMakeFiles/TextEditor.dir/src/terminal.c.obj	7caf56a6f6d9286f
+18	771	8007116913185338	CMakeFiles/TextEditor.dir/src/render.c.obj	abfbfbb24be159ab
+60	776	8007116913628408	CMakeFiles/TextEditor.dir/src/common.c.obj	deb0a122f5c3742a
+52	780	8007116913538401	CMakeFiles/TextEditor.dir/src/syntax.c.obj	a6c6c99a58ce3af0
+42	781	8007116913438470	CMakeFiles/TextEditor.dir/src/fileio.c.obj	83044389223d80e2
+34	782	8007116913356824	CMakeFiles/TextEditor.dir/src/input.c.obj	9d1bdd231803a0e6
+26	783	8007116913275870	CMakeFiles/TextEditor.dir/src/editor.c.obj	afaf5574e221e157
+783	901	8007116920847611	TextEditor.exe	8e74a174f23aacaf

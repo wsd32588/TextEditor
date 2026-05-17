@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake --build .)",
+      "Bash(python3 -c \"import docx; print\\('PYTHON_DOCX_OK'\\)\")",
+      "Bash(python -c \"import docx; print\\('PYTHON_DOCX_OK'\\)\")",
+      "Bash(python *)",
+      "Bash(cmake --build . --target TextEditor)",
+      "Read(//dev/**)",
+      "Bash(git -C \"E:\\\\works\\\\forCpp\\\\Notepad\" log --oneline)",
+      "Bash(cmake --build . --target clean)",
+      "Bash(cmake .. -GNinja)",
+      "Bash(taskkill /f /im TextEditor.exe)",
+      "Bash(powershell *)",
+      "Bash(cmake .. -G \"Ninja\")",
+      "Bash(ninja)",
+      "Bash(cmake -S \"E:/works/forCpp/Notepad\" -B \"E:/works/forCpp/Notepad/cmake-build-debug\" -G \"Ninja\")",
+      "Bash(ninja -C \"E:/works/forCpp/Notepad/cmake-build-debug\")",
+      "Bash(cmake -B build -G \"Ninja\" -DCMAKE_C_COMPILER=gcc)",
+      "Bash(ninja -C build)",
+      "Bash(xargs wc -l)",
+      "Bash(./TextEditor.exe /tmp/test_multiline.c)",
+      "Bash(echo \"Exit code: $?\")",
+      "Bash(E:/works/forCpp/Notepad/build/TextEditor.exe /tmp/test_multiline.c)",
+      "Bash(E:/works/forCpp/Notepad/build/ninja *)",
+      "Bash(zip -r ../TextEditor_VERSION_0.1.zip . -x \"build/*\" \"cmake-build-*/*\" \".git/*\" \".claude/settings.local.json\")",
+      "Read(//e/works/forCpp/**)",
+      "Bash(rm -rf E:/works/forCpp/Notepad/.git E:/works/forCpp/Notepad/.gitignore)"
+    ]
+  }
+}

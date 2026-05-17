@@ -1,0 +1,693 @@
+=========================================================
+Fix Log - TextEditor Project
+=========================================================
+Date      : 2026-05-14 — 2026-05-15
+Author    : Claude Code (AI assistant)
+=========================================================
+Revisions : 3
+
+=========================================================
+Revision 1 — 2026-05-14
+=========================================================
+
+Summary
+---------------------------------------------------------
+Fixed 5 bugs: ANSI escape typo, two cursor bounds overruns,
+missing key handlers (ENTER/BACKSPACE/DEL/TAB), and a
+symbol-name mismatch between syntax.h and syntax.c.
+
+Detail
+---------------------------------------------------------
+
+[1] render.c — Wrong ANSI escape code
+    Before : "\x1b[k"  (lowercase k)
+    After  : "\x1b[K"  (uppercase K)
+    Why    : CSI K (Erase in Line) is the standard ANSI
+             sequence to clear from cursor to end of line.
+             Lowercase k is non-standard and silently ignored
+             by Windows Terminal, causing line-clearing to
+             silently fail and old characters to remain on
+             screen.
+
+[2] input.c — Cursor-down out-of-bounds crash
+    Before : cursor_y < screen_rows - 1
+    After  : cursor_y < num_rows - 1
+    Why    : The old check limited cursor movement by screen
+             height, not file content height. Pressing down
+             past the last file row then typing would access
+             row[cursor_y] when cursor_y >= num_rows →
+             out-of-bounds read → crash.
+
+[3] input.c — Cursor-right wrong boundary
+    Before : cursor_x < screen_cols - 1
+    After  : cursor_x < row->size  (guarded by cursor_y < num_rows)
+    Why    : Cursor should stop at the end of the current
+             line's content, not the screen edge. The old
+             check let the cursor float past line content,
+             causing visual desync and confusing insertion
+             positions.
+
+[4] ENTER / BACKSPACE / DELETE / TAB keys unhandled
+    Files : input.c + editor.c + editor.h
+    What  :
+      - Added editor_delChar()              — backspace
+      - Added editor_deleteCharAtCursor()   — delete key
+      - Added editor_insert_newline()       — enter
+      - Added editor_insert_tab()           — tab
+      - Bound all four to g_key_bindings[]
+    Why    : These keys were defined in the EditorKeys enum
+             but had no action functions or binding entries,
+             making them silent no-ops at runtime.
+
+[5] syntax.c — Symbol-name mismatch with syntax.h
+    Before : g_highlight_data_base[], g_highlight_db_entries
+    After  : g_high_light_data_base[], g_high_light_data_base_entries
+    Why    : syntax.h declared extern names with "high_light"
+             and "data_base_entries", but syntax.c defined
+             them as "highlight" and "db_entries". Linker
+             would fail with "unresolved external symbol".
+
+Affected Files
+---------------------------------------------------------
+  src/render.c      —  1 line changed
+  src/input.c       — 12 lines changed
+  src/editor.c      — 110 lines added
+  src/editor.h      —  1 line added
+  src/syntax.c      —  2 lines changed
+
+=========================================================
+Revision 2 — 2026-05-15
+=========================================================
+
+Summary
+---------------------------------------------------------
+Fixed 7 issues from code review: signature mismatch, header
+static cleanup, terminal buffer restore on quit, argv file
+opening, safe allocator usage, status message impl, dead code.
+
+Detail
+---------------------------------------------------------
+
+[1] include/fileio.h — editor_open signature mismatch
+    Before : int editor_open(EditorConfig *ec, char *filename);
+    After  : void editor_open(EditorConfig *ec, const char *filename);
+    Why    : Definition in fileio.c used void and const, but
+             header declared int and non-const — compile error.
+
+[2] include/input.h — static declarations in header
+    Removed: 5 static forward declarations for cursor movement
+             functions and editor_quit.
+    Why    : static in a header gives each includer a private
+             copy — semantically wrong. These belong only in
+             input.c where the functions are already defined
+             static before their first use.
+
+[3] src/input.c — editor_quit: restore main screen buffer
+    Added : WriteFile(..., "\x1b[?1049l", ...) before exit.
+    Why    : editor_init enters alternate screen (\x1b[?1049h)
+             but editor_quit never exited it, leaving terminal
+             corrupted after quit.
+
+[4] src/Main/main.c — argv file-opening support
+    Added : #include "fileio.h", argc >= 2 → editor_open()
+    Why    : Editor could only create new files; running
+             "TextEditor foo.c" was a silent no-op.
+
+[5] src/render.c — abuf_append: remove unreachable NULL check
+    Before : realloc() + if (new_ptr == NULL) return;
+    After  : editor_safe_realloc() — no check needed.
+    Why    : editor_safe_realloc exits on OOM, so the NULL
+             check after it was dead code. Consistent with
+             the rest of the codebase.
+
+[6] src/editor.c — editor_set_status_message implemented
+    Before : empty function body
+    After  : vsnprintf into ec->statusmsg + time() stamp
+    Why    : Function did nothing — status messages silently
+             lost. Also added missing #include <stdarg.h>.
+
+[7] Dead leftovers removed
+    - TextEditor.h        (deleted): unused termios compat layer
+    - src/fileio.c                  : duplicate semicolon ";;"
+    - src/fileio.c                  : redundant safe_realloc comment
+
+Affected Files
+---------------------------------------------------------
+  include/fileio.h         —  1 line changed
+  include/input.h          —  6 lines removed
+  src/input.c              —  3 lines changed
+  src/Main/main.c          —  4 lines added
+  src/render.c             —  4 lines changed
+  src/editor.c             —  9 lines added
+  src/fileio.c             —  3 lines changed
+  TextEditor.h             —  file deleted
+
+=========================================================
+Revision 3 — 2026-05-15 (Gemini supplemental)
+=========================================================
+
+Summary
+---------------------------------------------------------
+Fixed 4 issues identified as gaps in Revision 2: dead editor_find
+declaration, redundant terminal static variables, missing explicit
+disable_raw_mode call, empty buffer stubs in build.
+
+Detail
+---------------------------------------------------------
+
+[1] include/editor.h — Remove dead editor_find declaration
+    Removed : void editor_find(EditorConfig *ec, int fd);
+    Why     : Declared but never defined anywhere. Left in the
+              header it would create linker errors if ever called.
+
+[2] src/terminal.c — Remove redundant static mode variables
+    Removed :
+      - static DWORD s_orig_in_mode
+      - static DWORD s_orig_out_mode
+      - static void atexit_disable_raw_mode(void)
+      - atexit(atexit_disable_raw_mode) call
+    Why     : These statics duplicated EditorConfig's
+              dwOriginalInMode / dwOriginalOutMode. The atexit
+              fallback was replaced by explicit disable_raw_mode()
+              in editor_quit. On OOM crash paths Windows cleans
+              up console handles on process termination anyway.
+
+[3] src/input.c — Call disable_raw_mode before quit
+    Added   : disable_raw_mode(ec) at top of editor_quit
+    Why     : Ensures terminal is restored BEFORE switching back
+              from the alternate screen buffer. Previously the
+              atexit handler was the only path restoring raw mode.
+
+[4] CMakeLists.txt — Remove empty buffer stubs from build
+    Removed : src/buffer.c from SOURCES, include/buffer.h from HEADERS
+    Why     : Both files were empty — contributed zero symbols but
+              added a compile step and misled developers.
+
+Affected Files
+---------------------------------------------------------
+  include/editor.h        —  1 line removed
+  src/terminal.c          — 12 lines removed
+  src/input.c             —  1 line added
+  CMakeLists.txt          —  2 lines removed
+
+=========================================================
+Total Changes (All Revisions)
+=========================================================
+  src/render.c            —  5 lines changed
+  src/input.c             — 16 lines changed
+  src/editor.c            — 119 lines added
+  src/editor.h            —  2 lines changed (1 added, 1 removed)
+  src/fileio.c            —  3 lines changed
+  src/syntax.c            —  2 lines changed
+  src/Main/main.c         —  4 lines added
+  src/terminal.c          — 12 lines removed
+  include/fileio.h        —  1 line changed
+  include/input.h         —  6 lines removed
+  include/editor.h        —  1 line removed
+  CMakeLists.txt          —  2 lines removed
+  TextEditor.h            —  file deleted
+
+=========================================================
+Revision 4 — 2026-05-15 (Post-review bugfix)
+=========================================================
+
+Summary
+---------------------------------------------------------
+Fixed editor_insert_newline cursor position bug: pressing Enter
+at the start of a line (cursor_x == 0) caused cursor_y to
+advance twice, skipping the new empty line.
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] src/editor.c — editor_insert_newline cursor skip on cursor_x==0
+    Before :
+      if (cursor_x == 0) { insert_raw(ec, cursor_y, "", 0); }
+      cursor_y++;  // always runs — wrong for cursor_x==0
+    After  :
+      if (cursor_x == 0) { insert_raw(ec, cursor_y, "", 0); }
+      else { /* split row ... */ cursor_y++; }
+      cursor_x = 0;
+    Why    : When cursor_x==0, insert_raw inserts an empty row
+             AT cursor_y, pushing the current content row down.
+             The cursor should stay on the empty line. Running
+             cursor_y++ unconditionally skipped past it to the
+             content row below, causing an off-by-one: the line
+             the user was on appeared visually empty, the next
+             line showed the typing destination, and the first
+             line scrolled off the terminal.
+
+Affected Files
+---------------------------------------------------------
+  src/editor.c            —  5 lines changed
+
+=========================================================
+Revision 5 — 2026-05-15 (Screen scroll fix)
+=========================================================
+
+Summary
+---------------------------------------------------------
+Fixed terminal scroll bug: status bar's trailing \r\n at the
+bottom of the screen pushed all content up into scrollback,
+making typed characters invisible.
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] src/render.c — editor_draw_status_bar: remove scroll-inducing \r\n
+    Before :
+      abuf_append(ab, "\x1b[m", 3);   // reset attributes
+      abuf_append(ab, "\r\n", 2);     // ← pushed cursor past last line → scroll!
+    After  :
+      abuf_append(ab, "\x1b[m", 3);   // reset attributes only
+    Why    : After drawing content rows (screen_rows-1 lines) and the
+             status bar on the last visible line, the trailing \r\n
+             moved the cursor one line past the bottom, forcing the
+             terminal to scroll the entire screen up. Every frame this
+             pushed row 0 content into the scrollback buffer, making
+             typed text invisible (though still present in memory and
+             saved correctly). The cursor is repositioned by the
+             subsequent \x1b[row;colH in editor_refresh_screen, so
+             the \r\n served no purpose.
+
+Affected Files
+---------------------------------------------------------
+  src/render.c            —  2 lines removed
+
+=========================================================
+Revision 6 — 2026-05-15 (Backspace crash fix)
+=========================================================
+
+Summary
+---------------------------------------------------------
+Fixed editor_update_syntax calling editor_safe_realloc with
+size=0 on empty rows, causing exit(1) on MinGW where
+realloc(non-NULL, 0) frees memory and returns NULL.
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] src/syntax.c — editor_update_syntax: handle empty rows
+    Before :
+      row->high_light = editor_safe_realloc(row->high_light,
+                                             row->size);
+      // memset + scan for digits...
+    After  :
+      if (row->size == 0) { free(row->high_light);
+                             row->high_light = NULL; return; }
+      row->high_light = editor_safe_realloc(row->high_light,
+                                             row->size);
+      // memset + scan...
+    Why    : When a row becomes empty (e.g. deleting the last
+             character), editor_update_syntax called
+             realloc(non-NULL, 0). On MinGW (MSVCRT) this frees
+             the memory and returns NULL, which editor_safe_realloc
+             interpreted as OOM and called exit(1).
+             The fix early-returns on size==0 after freeing the
+             old highlight buffer, avoiding the zero-size realloc
+             entirely.
+
+Affected Files
+---------------------------------------------------------
+  src/syntax.c            —  5 lines changed
+
+=========================================================
+Revision 7 — 2026-05-16
+=========================================================
+
+Summary
+---------------------------------------------------------
+Added editor_safe_malloc, fixed 3 bugs in editor_prompt/editor_find:
+NULL-safety, duplicate backspace check, missing key binding.
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] include/common.h + src/common.c — Add editor_safe_malloc
+    Why    : editor_prompt used raw malloc in one place while the
+             rest of the codebase used editor_safe_realloc for OOM
+             safety. Signature (void *ptr, size_t size) matches
+             editor_safe_realloc for consistency.
+
+[2] src/editor.c — editor_prompt: use editor_safe_malloc
+    Before : char *buf = malloc(buf_size);
+    After  : char *buf = editor_safe_malloc(NULL, buf_size);
+    Why    : malloc return value was never checked. If malloc
+             failed, buf[0] = '\0' would null-pointer-dereference.
+
+[3] src/editor.c — editor_prompt: deduplicate backspace check
+    Before : c == 127 || c == 8 || c == '\b' || c == KEY_BACKSPACE
+    After  : c == KEY_BACKSPACE
+    Why    : KEY_BACKSPACE == 127 and '\b' == 8, so the check
+             was four conditions covering only two distinct values.
+             Single KEY_BACKSPACE check is sufficient.
+
+[4] src/editor.c — editor_find: direct row_off assignment
+    Before : ec->row_off = ec->num_rows;
+    After  : ec->row_off = ec->cursor_y;
+    Why    : Old value relied on editor_scroll to correct it in
+             the next frame — confusing indirection. Setting
+             directly to cursor_y is clear and has the same effect.
+
+[5] src/input.c — Bind Ctrl+F to editor_find
+    Added : {KEY_CTRL_F, editor_find} to g_key_bindings[]
+    Why    : editor_find was implemented but never reachable at
+             runtime because no key binding existed.
+
+[6] include/editor.h — Add editor_prompt declaration
+    Added : char *editor_prompt(EditorConfig *ec, const char *prompt);
+    Why    : editor_prompt was defined in editor.c but not declared
+             in editor.h — other files (input.c) cannot call it
+             without a compiler warning.
+
+Affected Files
+---------------------------------------------------------
+  include/common.h      —  1 line added
+  src/common.c          — 11 lines added
+  src/editor.c          —  3 lines changed
+  include/editor.h      —  1 line added
+  src/input.c           —  1 line added
+
+=========================================================
+Revision 8 — 2026-05-16
+=========================================================
+
+Summary
+---------------------------------------------------------
+Fixed Enter-at-line-start cursor bug: cursor stayed on the new
+empty line instead of following the original content.
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] src/editor.c — editor_insert_newline: cursor stays on content
+    Before :
+      if (cursor_x == 0) {
+          editor_insert_raw(ec, cursor_y, "", 0);
+      }
+      // cursor stays on the empty line — BUG
+    After  :
+      if (cursor_x == 0) {
+          editor_insert_raw(ec, cursor_y, "", 0);
+          ec->cursor_y++;  // follow content to next row
+      }
+    Why    : editor_insert_raw inserts the empty row AT cursor_y,
+             pushing the original content to cursor_y+1. Without
+             incrementing cursor_y, the cursor lands on the new
+             empty line instead of the content the user was on.
+
+Affected Files
+---------------------------------------------------------
+  src/editor.c          —  1 line added
+
+=========================================================
+Revision 9 — 2026-05-16
+=========================================================
+
+Summary
+---------------------------------------------------------
+Review cleanup: removed redundant HL_MATCH in editor_find, removed
+dead row->index field, added save-fail feedback, enlarged terminal
+seq buffer, allowed empty Enter in prompt.
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] src/editor.c — editor_find: remove redundant HL_MATCH memset
+    Removed: memset(&row->high_light[...], HL_MATCH, ...) after
+             the search loop.
+    Why    : editor_update_syntax already applies HL_MATCH globally
+             to all matched rows. The per-row memset was redundant
+             — it wrote the same value at the same location.
+
+[2] include/common.h + src/editor.c — Remove dead row->index
+    Removed: int index field from EditorRow struct, and all
+             assignments to it in editor_insert_raw.
+    Why    : index was maintained (set on insert, incremented on
+             shift) but never read anywhere. Pure dead code.
+
+[3] src/fileio.c — editor_save: error message on fopen failure
+    Before : if (!fp) return;
+    After  : if (!fp) { editor_set_status_message(ec, "Saved Failed! I/O error."); return; }
+    Why    : Silent save failure misleads users into thinking the
+             file was written successfully.
+
+[4] src/terminal.c — Enlarge seq buffer from 4 to 8 bytes
+    Before : char seq[4] = {0};
+    After  : char seq[8] = {0};
+    Why    : \x1b[1~ style sequences need 4 bytes minimum; the old
+             4-byte buffer (incl. null) was too tight. 8 provides
+             room for longer CSI sequences.
+
+[5] src/editor.c — editor_prompt: accept Enter on empty buffer
+    Before : if (buf_len != 0) { return buf; }
+    After  : if (buf_len != 0) { return buf; } else { free(buf); return NULL; }
+    Why    : Pressing Enter with empty search text previously did
+             nothing, forcing the user to discover ESC exits.
+             Now treated as cancel (same as ESC).
+
+Affected Files
+---------------------------------------------------------
+  src/editor.c          —  9 lines removed, 1 line changed
+  include/common.h      —  1 line removed
+  src/fileio.c          —  3 lines added
+  src/terminal.c        —  1 line changed
+
+=========================================================
+Revision 10 — 2026-05-16
+=========================================================
+
+Summary
+---------------------------------------------------------
+Fixed cursor off-by-one caused by gutter_width not accounting for
+the trailing space after line numbers. Fixed Enter-on-empty-file
+leaving cursor past end of file (tilde lines + backspace no-op).
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] src/render.c — gutter visual width mismatch (cursor off by 1)
+    The line-number format "\x1b[36m%*d \x1b[39m" produces
+    gutter_width + 1 visible columns (number field + trailing space),
+    but all positioning code used gutter_width alone.
+    Fixed 4 locations:
+      - editor_scroll:   screen_cols - gutter_width
+                         → screen_cols - gutter_width - 1
+      - available_cols:  screen_cols - gutter_width
+                         → screen_cols - gutter_width - 1
+      - tilde width:     gutter_width - 1 → gutter_width
+      - cursor position: cursor_x + 1 + gutter_width
+                         → cursor_x + gutter_width + 2
+
+[2] src/editor.c — editor_insert_newline: cursor past EOF on empty file
+    Before :
+      if (cursor_x == 0) {
+          insert_raw(ec, cursor_y, "", 0);
+          ec->cursor_y++;  // unconditional — broken when num_rows was 0
+      }
+    After  :
+      if (cursor_x == 0) {
+          insert_raw(ec, cursor_y, "", 0);
+          if (ec->cursor_y < ec->num_rows - 1)  // content was pushed down
+              ec->cursor_y++;
+      }
+    Why    : Opening an empty file (num_rows=0) and pressing Enter
+             created row[0] but then cursor_y++ left the cursor at
+             cursor_y=1 >= num_rows=1. This caused:
+             - the second display line to render as "~" (no row data)
+             - Backspace to silently return (cursor_y >= num_rows)
+             - typing to create the row belatedly, fixing both issues
+             The fix only advances the cursor when there is actually
+             a row of content being pushed down.
+
+Affected Files
+---------------------------------------------------------
+  src/render.c          —  4 lines changed
+  src/editor.c          —  3 lines changed
+
+=========================================================
+Revision 11 — 2026-05-16
+=========================================================
+
+Summary
+---------------------------------------------------------
+Added per-file-type tab_stop: EditorSyntax gains a tab_stop field,
+ec->tab_stop is set automatically when a syntax match is found,
+defaulting to EDITOR_TAB_STOP (4).
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] include/common.h — Add tab_stop to EditorSyntax + EditorConfig
+    Added: int tab_stop to struct EditorSyntax
+    Added: int tab_stop to EditorConfig
+    Removed: unused KILO_TAB_STOP 8 macro
+    Relocated: EDITOR_TAB_STOP 4 to the constants section
+
+[2] src/editor.c — Initialize ec->tab_stop
+    Added: ec->tab_stop = EDITOR_TAB_STOP; in editor_init
+
+[3] src/syntax.c — Set tab_stop per language entry + selector
+    Added: tab_stop = 4 to the C/C++ syntax entry
+    Updated: editor_select_syntax_highlight sets ec->tab_stop =
+             s->tab_stop on match, falls back to EDITOR_TAB_STOP
+             when no syntax matches
+
+Affected Files
+---------------------------------------------------------
+  include/common.h      —  5 lines changed
+  src/editor.c          —  1 line added
+  src/syntax.c          —  3 lines changed
+
+=========================================================
+Revision 12 — 2026-05-16
+=========================================================
+
+Summary
+---------------------------------------------------------
+Fixed 5 bugs from code review: backspace/delete render-sync,
+unused HLDB_ENTRIES macro, display loop writing raw tabs to
+terminal, and cursor position using wrong col_off space.
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] src/editor.c — editor_delChar: update render buffer on backspace
+    Before : editor_update_syntax(ec, row);
+    After  : editor_update_row(ec, row);
+    Why    : Simple backspace deletes a character but only
+             re-ran syntax highlighting, skipping render buffer
+             regeneration. When tab_stop differs from the terminal's
+             default, the display would show stale tab-expanded
+             content. editor_update_row calls editor_update_syntax
+             internally, so highlighting is still correct.
+
+[2] src/editor.c — editor_deleteCharAtCursor: update render buffer on delete
+    Before : editor_update_syntax(ec, row);
+    After  : editor_update_row(ec, row);
+    Why    : Same root cause as [1]. Simple delete key re-ran
+             syntax only, leaving the render buffer stale.
+
+[3] src/syntax.c — Remove unused HLDB_ENTRIES macro
+    Before : #define HLDB_ENTRIES (...)
+             const int g_high_light_data_base_entries = (...);
+    After  : const int g_high_light_data_base_entries = (...);
+    Why    : The #define was never used anywhere in the codebase;
+             only the const int variant was used by
+             editor_select_syntax_highlight. Removed the dead macro.
+
+[4] src/render.c — Display loop: expand tabs to spaces during render
+    The old loop indexed chars directly with col_off + j and wrote
+    raw characters (including \t) to the terminal. The terminal
+    would expand \t at its own tab stop (usually 8), but the
+    editor uses ec->tab_stop (e.g. 4). Causing visual misalignment
+    on any line containing a tab when tab_stop != 8.
+    Fixed by a two-phase loop:
+      Phase 1: skip past col_off using render-space tracking (rx)
+      Phase 2: render visible chars with inline tab expansion:
+        - \t → emit spaces up to the next tab_stop boundary
+        - other chars → write one byte, advance rx
+    Syntax highlighting uses chars-space indexing (j), so
+    row->high_light[j] remains correct throughout.
+
+[5] src/render.c — Cursor positioning: use render-space col_off_rx
+    Before : rx - ec->col_off
+    After  : rx - col_off_rx  (where col_off_rx =
+              editor_row_cx_to_rx(ec, row, ec->col_off))
+    Why    : rx is in render space (after tab expansion), but
+             ec->col_off is in chars space (before expansion).
+             When tabs existed before the horizontal scroll offset,
+             rx - col_off could be negative or wrong, placing the
+             cursor at an incorrect column.
+
+Affected Files
+---------------------------------------------------------
+  src/editor.c          —  2 lines changed
+  src/syntax.c          —  2 lines removed
+  src/render.c          — ~80 lines changed (display loop rewrite)
+                         + 3 lines changed (cursor positioning)
+
+=========================================================
+Revision 13 — 2026-05-17
+=========================================================
+
+Summary
+---------------------------------------------------------
+Implemented multiline comment (/* */) syntax highlighting with
+state-machine tracking across rows. Fixed editor_safe_realloc
+for size==0 (latent MinGW crash), added HL_ML_COMMENT colour
+in render.c.
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] src/syntax.c — editor_update_syntax: multiline comment state machine
+    Rewrote the function with three priority layers:
+      1. Multiline comment state machine (highest priority)
+         - Checks in_comment flag inherited from previous row
+         - While in_comment: paints HL_ML_COMMENT, checks for
+           closing delimiter mce, transitions out on match
+         - When not in_comment: checks for opening delimiter mcs,
+           transitions in on match
+         - Both paths use `continue` to skip keyword/single-line
+           matching while inside a comment
+      2. Single-line comment detection (unchanged logic)
+      3. Keyword matching at word boundaries (unchanged logic)
+    Added recursive propagation: when highlight_open_comment
+    changes, editor_update_syntax is called on the next row to
+    immediately re-highlight it (avoids stale colours until the
+    next keystroke).
+    Moved render_size == 0 guard BEFORE safe_realloc to avoid
+    calling realloc(non-NULL, 0) which crashes on MinGW.
+
+[2] src/render.c — editor_syntax_to_color: add HL_ML_COMMENT case
+    Before : (no case — fell through to default white)
+    After  : case HL_ML_COMMENT: return 36;  // cyan
+    Why    : Without this, multiline comment bytes were rendered
+             as default white instead of comment-cyan.
+
+[3] src/common.c — editor_safe_realloc: handle size==0
+    Before : realloc(ptr, 0) → frees and returns NULL on MSVCRT,
+             which was treated as OOM → exit(1).
+    After  : size==0 frees ptr and returns NULL directly.
+    Why    : Latent crash. Other callers never pass 0 today, but
+             the function should handle it gracefully instead of
+             calling exit(1) on a valid realloc size.
+
+Affected Files
+---------------------------------------------------------
+  src/syntax.c            — ~65 lines changed (rewrite)
+  src/render.c            —   1 line added
+  src/common.c            —   4 lines added
+
+=========================================================
+Revision 14 — 2026-05-17
+=========================================================
+
+Summary
+---------------------------------------------------------
+Added editor_find_next (Ctrl+G) for find-next navigation without
+re-entering search query. Added KEY_CTRL_G constant.
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] src/editor.c — Add editor_find_next
+    New function that reuses ec->search_query (set by Ctrl+F) to
+    find the next match. Searches the current line from cursor_x+1
+    first (same-line multiple matches), then does a ring search
+    across rows. Shows "Search wrapped around" or "No more matches"
+    status messages. Falls back to editor_find when no query active.
+
+[2] include/common.h — Add KEY_CTRL_G = 7 to EditorKeys enum
+
+[3] include/editor.h — Declare editor_find_next
+
+[4] src/input.c — Bind KEY_CTRL_G to editor_find_next
+
+Affected Files
+---------------------------------------------------------
+  src/editor.c            —  29 lines added
+  include/common.h        —   1 line changed
+  include/editor.h        —   1 line added
+  src/input.c             —   1 line added
