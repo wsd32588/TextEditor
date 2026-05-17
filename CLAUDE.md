@@ -80,13 +80,25 @@ CMakeLists.txt 要求 C99 + `-Wall -Wextra -Wpedantic`。链接 `kernel32`。
 
 ## 已知问题 / 待办项
 
-- 搜索功能（Ctrl+F）未实现
-- 行跳转功能未实现
-- 多行注释（`/* */`）语法高亮未实现
 - 字符串字面量语法高亮未实现
-- UTF-8 / 中文支持未实现
-- 转义序列缓冲区 `seq[4]` 偏小，无法容纳 Ctrl+Arrow 等 6 字节序列
+- 数字字面量语法高亮未实现
+- 行跳转功能未实现
 - 鼠标支持未实现
+
+## Git 仓库
+
+- 远程：`git@github.com:wsd32588/TextEditor.git`（SSH）
+- `.gitignore` 排除：`build/`、`.claude/`、`.idea/`、`*.exe`、个人笔记
+- VERSION_0.1 快照已打 zip 备份：`../TextEditor_VERSION_0.1.zip`
+
+## 近期实现（2026-05-17 为止）
+
+- **覆盖模式** — INS 切换 `ec->overwrite_mode`，按位覆写而非插入
+- **快速打开** — Ctrl+P 搜索文件名直接打开（放弃未保存修改时警告）
+- **多行注释高亮** — `/* */` 状态机跨行追踪 + 递归重刷
+- **Ctrl+G 查找下一个** — 同行续搜 → 跨行环形搜，绕回时提示
+- **`editor_safe_realloc`** 处理 size==0，消除 MinGW crash
+- **UTF-8 全链路支持** — 坐标转换/光标移动/删除/覆盖模式/输入/提示框均按完整字符处理，支持中文和 Emoji
 
 ## 变更日志要求
 

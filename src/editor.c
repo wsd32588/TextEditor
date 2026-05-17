@@ -18,6 +18,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+void editor_row_del_char(EditorConfig *ec, EditorRow *row, int at);
+
 // ============================================================
 //  编辑器初始化
 // ============================================================
@@ -72,40 +74,85 @@ void editor_free_all_row(EditorConfig *ec){
 int editor_row_cx_to_rx(EditorConfig *ec, EditorRow *row, int cx)
 {
     int rx = 0;                         // 累加器：render-space 列号
-    for (int j = 0; j < cx; j++) {
-        if (row->chars[j] == '\t')
-            rx += (ec->tab_stop - 1) - (rx % ec->tab_stop);  // 跳到下个制表位
-        rx++;
+    for (int j = 0; j < cx; j++)
+    {
+        unsigned char c = (unsigned char)row->chars[j];
+        if (c == '\t'){
+            rx += (ec->tab_stop - 1) - (rx % ec->tab_stop) + 1;  // 跳到下个制表位
+        }else if ((c & 0xC0) != 0x80){
+            rx += utf8_char_display_width(c);
+        }
     }
     return rx;
+}
+
+int editor_row_rx_to_cx(EditorConfig *ec, EditorRow *row, int rx){
+    int cur_rx = 0;
+    int cx;
+
+    // 从行首向后遍历内存字节
+    for (cx = 0; cx < row->size; cx++){
+        unsigned char c = (unsigned char)row->chars[cx];
+
+        if (c == '\t'){
+            cur_rx += (ec->tab_stop - 1) - (cur_rx % ec->tab_stop) + 1;
+        }else if ((c & 0xC0) != 0x80)
+        {
+            cur_rx += utf8_char_display_width(c);
+        }
+
+        if (cur_rx > rx) return cx;
+    }
+    return cx;
 }
 
 // ============================================================
 //  Render 缓冲区生成
 // ============================================================
 
-void editor_update_row(EditorConfig *ec, EditorRow *row)
-{
-    int tabs = 0;                       // 先数 tab 数，算 render 缓冲区大小
-    for (int j = 0; j < row->size; j++) {
-        if (row->chars[j] == '\t') tabs++;
-    }
-    free(row->render);
-    row->render = NULL;
-    row->render = editor_safe_realloc(NULL,
-                      row->size + tabs * (ec->tab_stop - 1) + 1);
-
-    int idx = 0;                        // render 写入指针
+void editor_update_row(EditorConfig *ec, EditorRow *row) {
+    // 1. 预计算准确的 render 缓冲区大小，并精确追踪视觉宽度 rx
+    int render_size = 0;
+    int rx = 0;
     for (int j = 0; j < row->size; j++) {
         if (row->chars[j] == '\t') {
-            row->render[idx++] = ' ';
-            while (idx % ec->tab_stop != 0) row->render[idx++] = ' ';
+            int padding = (ec->tab_stop - 1) - (rx % ec->tab_stop) + 1;
+            render_size += padding;
+            rx += padding;
+        } else {
+            render_size++; // render 数组依然是按字节存储
+            if (((unsigned char)row->chars[j] & 0xC0) != 0x80) {
+                rx += utf8_char_display_width((unsigned char)row->chars[j]);
+            }
+        }
+    }
+
+    // 2. 分配 render 缓冲区
+    free(row->render);
+    row->render = editor_safe_realloc(NULL, render_size + 1);
+
+    // 3. 填充 render 缓冲区（使用视觉 rx 对齐 Tab）
+    int idx = 0;
+    rx = 0;
+    for (int j = 0; j < row->size; j++) {
+        if (row->chars[j] == '\t') {
+            int padding = (ec->tab_stop - 1) - (rx % ec->tab_stop) + 1;
+            for (int k = 0; k < padding; k++) row->render[idx++] = ' ';
+            rx += padding;
         } else {
             row->render[idx++] = row->chars[j];
+            if (((unsigned char)row->chars[j] & 0xC0) != 0x80) {
+                rx += utf8_char_display_width((unsigned char)row->chars[j]);
+            }
         }
     }
     row->render[idx] = '\0';
     row->render_size = idx;
+
+    // 🚀 核心防御：在交给语法高亮器之前，强制分配并清零 high_light 数组！
+    // 这彻底杜绝了内存垃圾导致的 ANSI 序列切碎 UTF-8 字符的问题。
+    row->high_light = editor_safe_realloc(row->high_light, row->render_size);
+    memset(row->high_light, HL_NORMAL, row->render_size);
 
     editor_update_syntax(ec, row);
 }
@@ -170,6 +217,18 @@ void editor_insert_char(EditorConfig *ec, int c) {
 
     //如果开启了覆盖模式，且光标没有越界，直接原地覆写
     if (ec->overwrite_mode && ec->cursor_x < row->size){
+        unsigned char old_c = (unsigned char)row->chars[ec->cursor_x];
+        int old_len = utf8_char_length(old_c);
+        if (ec->cursor_x + old_len > row->size)
+            old_len = row->size - ec->cursor_x;
+
+        /* 如果旧字符占多字节，删掉多余后缀字节（保留 1 字节留给新值覆写） */
+        if (old_len > 1) {
+            int tail = row->size - ec->cursor_x - old_len + 1;  // 含 '\0'
+            memmove(&row->chars[ec->cursor_x + 1],
+                    &row->chars[ec->cursor_x + old_len], tail);
+            row->size -= (old_len - 1);
+        }
         row->chars[ec->cursor_x] = c;
         editor_update_row(ec, row);
         ec->cursor_x++;
@@ -191,14 +250,7 @@ void editor_delChar(EditorConfig *ec) {
     EditorRow *row = &ec->row[ec->cursor_y];
 
     if (ec->cursor_x > 0) {
-        /* 行内退格：左侧字符覆盖当前位置 */
-        memmove(&row->chars[ec->cursor_x - 1],
-                &row->chars[ec->cursor_x],
-                row->size - ec->cursor_x + 1);
-        row->size--;
-        editor_update_row(ec, row);
-        ec->cursor_x--;
-        ec->dirty++;
+        editor_row_del_char(ec, row, ec->cursor_x - 1);
     } else if (ec->cursor_y > 0) {
         /* 行首退格：当前行合并到上一行末尾 */
         EditorRow *prev_row = &ec->row[ec->cursor_y - 1];
@@ -231,6 +283,33 @@ void editor_delChar(EditorConfig *ec) {
     }
 }
 
+void editor_row_del_char(EditorConfig *ec,EditorRow *row, int at){
+    if (at < 0 || at >= row->size) return;
+    int start_at = at;
+
+    /* Walk backward from the last byte of the character to its leading byte.
+     * at == cursor_x - 1, which is exactly the last byte of the target char.
+     * Check chars[start_at] itself (not start_at - 1) because the byte at
+     * position at may already be a continuation byte. */
+    while (start_at > 0 && ((unsigned char)row->chars[start_at] & 0xC0) == 0x80) {
+        start_at--;
+    }
+
+    int del_len = at - start_at + 1;
+
+    //内存覆写，后面字符串往前拉覆盖整个多字节字符
+    memmove(&row->chars[start_at],&row->chars[at + 1],row->size - at);
+
+    //更新长度并且手搓内存
+    row->size -= del_len;
+    row->chars[row->size] = '\0';
+
+    editor_update_row(ec,row);
+    ec->dirty++;
+
+    ec->cursor_x = start_at;
+}
+
 // ============================================================
 //  Delete
 // ============================================================
@@ -242,11 +321,13 @@ void editor_deleteCharAtCursor(EditorConfig *ec) {
     EditorRow *row = &ec->row[ec->cursor_y];
 
     if (ec->cursor_x < row->size) {
-        /* 行内删除：右侧字符向左覆盖 */
+        int char_len = utf8_char_length((unsigned char)row->chars[ec->cursor_x]);
+        if (ec->cursor_x + char_len > row->size)
+            char_len = row->size - ec->cursor_x;
         memmove(&row->chars[ec->cursor_x],
-                &row->chars[ec->cursor_x + 1],
-                row->size - ec->cursor_x);
-        row->size--;
+                &row->chars[ec->cursor_x + char_len],
+                row->size - ec->cursor_x - char_len + 1);
+        row->size -= char_len;
         editor_update_row(ec, row);
         ec->dirty++;
     } else if (ec->cursor_y < ec->num_rows - 1) {
@@ -334,8 +415,13 @@ char *editor_prompt(EditorConfig *ec, const char *prompt)
         int c = terminal_read_key(ec);
 
         if (c == KEY_BACKSPACE) {
-            if (buf_len != 0)
-                buf[--buf_len] = '\0';
+            if (buf_len != 0) {
+                int del_len = 1;
+                while (buf_len - del_len > 0 && ((unsigned char)buf[buf_len - del_len] & 0xC0) == 0x80)
+                    del_len++;
+                buf_len -= del_len;
+                buf[buf_len] = '\0';
+            }
         } else if (c == KEY_ESC) {
             editor_set_status_message(ec, "");
             free(buf);
@@ -348,7 +434,7 @@ char *editor_prompt(EditorConfig *ec, const char *prompt)
                 free(buf);
                 return NULL;             // 空输入视为取消
             }
-        } else if (!iscntrl(c) && c < 128) {
+        } else if (!iscntrl(c) && c < 256) {
             if (buf_len == buf_size - 1) {
                 buf_size *= 2;
                 buf = editor_safe_realloc(buf, buf_size);

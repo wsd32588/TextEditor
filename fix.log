@@ -1,10 +1,10 @@
 =========================================================
 Fix Log - TextEditor Project
 =========================================================
-Date      : 2026-05-14 — 2026-05-15
+Date      : 2026-05-14 — 2026-05-17
 Author    : Claude Code (AI assistant)
 =========================================================
-Revisions : 3
+Revisions : 15
 
 =========================================================
 Revision 1 — 2026-05-14
@@ -691,3 +691,169 @@ Affected Files
   include/common.h        —   1 line changed
   include/editor.h        —   1 line added
   src/input.c             —   1 line added
+
+=========================================================
+Revision 15 — 2026-05-17
+=========================================================
+
+Summary
+---------------------------------------------------------
+UTF-8 多字节字符全链路支持：修复编辑器在中文/Emoji场景下的
+坐标转换、光标移动、字符删除、输入接收、覆盖模式等11处缺陷，
+实现从按键输入到屏幕渲染的完整 UTF-8 链路。
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] src/common.c — utf8_char_length 首字节范围收窄
+    Before : if (c >= 0xC0 && c <= 0xDF) return 2;
+    After  : if (c >= 0xC2 && c <= 0xDF) return 2;
+    Why    : 0xC0/0xC1 是 UTF-8 标准明确禁止的过长编码
+             (overlong)，它们解码出的码点 ≤ 0x7F，不应被当作
+             合法的 2 字节序列首字节。
+
+[2] src/editor.c — editor_row_cx_to_rx 改为 display_width
+    Before : rx += utf8_char_length(c);
+    After  : rx += utf8_char_display_width(c);
+    Why    : utf8_char_length 返回字节数（中文=3），而终端
+             视觉列宽应为 display_width（中文=2）。用错导致
+             光标定位偏右、水平滚动边界计算错误、所有坐标转换
+             产生累积偏移。
+
+[3] src/editor.c — editor_row_rx_to_cx 修复两个错误
+    Before : if (c == '\n') { ... }
+             cur_rx += utf8_char_length(c);
+    After  : if (c == '\t') { ... }
+             cur_rx += utf8_char_display_width(c);
+    Why    : ① '\n' 是笔误（应为 '\t'），导致 Tab 跳转宽度
+             计算被跳过，Tab只剩1列。② 同[2]，应用display_width。
+
+[4] src/editor.c — editor_delChar 行内退格改用字符级删除
+    Before : memmove 移 1 字节，row->size--，cursor_x--;
+    After  : editor_row_del_char(ec, row, ec->cursor_x - 1);
+    Why    : 按字节删中文只删掉 1/3 个字符，剩余后续字节变成
+             孤立字节，终端渲染为乱码。改为调用已有的字符级
+             删除函数，向后扫描找到首字节后一次性移走 1~4 字节。
+             新增前向声明消除 implicit declaration 警告。
+
+[5] src/editor.c — editor_deleteCharAtCursor 行内Delete
+    Before : memmove 移 1 字节，row->size--;
+    After  : utf8_char_length 取当前字符长度 char_len，
+             memmove 一次性移走 char_len 字节
+    Why    : 同[4]，Delete 键删除中文只删 1 字节产生乱码。
+
+[6] src/editor.c — editor_insert_char 覆盖模式宽字符处理
+    Before : row->chars[ec->cursor_x] = c;  // 直接覆写 1 字节
+    After  : 计算旧字符 old_len，若 >1 则 memmove 压缩掉
+             (old_len-1) 个后缀字节，保留1字节给新值覆写
+    Why    : 在中文上用 ASCII 覆写，剩余后续字节变孤立字节。
+             修复：用 1 字节新值替换整个旧宽字符。
+
+[7] src/editor.c — editor_prompt 接受非 ASCII 输入
+    Before : } else if (!iscntrl(c) && c < 128) {
+    After  : } else if (!iscntrl(c) && c < 256) {
+    Why    : c < 128 阻断了所有 UTF-8 多字节字符（首字节
+             ≥ 0xC2），搜索框、Save As 等无法输入中文。
+
+[8] src/editor.c — editor_prompt 退格支持 UTF-8 字符删除
+    Before : buf[--buf_len] = '\0';
+    After  : 向后扫描后续字节（10xxxxxx），计算完整字符长度
+             del_len，一次性回退 del_len 字节
+    Why    : 与主编辑器相同的中文退格乱码问题。
+
+[9] src/input.c — editor_cursor_move_right 按 UTF-8 字符跳转
+    Before : ec->cursor_x++;  // 逐字节 +1
+             else if 分支为死代码（永远执行不到）且存在
+             ec->row 缺少 [cursor_y] 索引的类型错误
+    After  : utf8_char_length 取当前字符字节数，cursor_x
+             跳过完整字符；删除无效的死代码分支
+    Why    : 逐字节移动导致光标走入中文的后续字节中间，此后
+             插入/删除操作都从非法位置开始。
+
+[10] src/input.c — editor_cursor_move_left 修正行索引
+     Before : ec->row->chars[ec->cursor_x]（缺少 [cursor_y]）
+     After  : EditorRow *row = &ec->row[ec->cursor_y];
+              row->chars[ec->cursor_x]
+     Why    : ec->row 是行数组指针，ec->row->chars 等价于
+              ec->row[0].chars。在非首行时读取到错误行数据。
+
+[11] src/input.c — editor_cursor_move_up/down 保持视觉列
+     Before : 单纯 ec->cursor_y ± 1，cursor_x 不调整
+     After  : 先 editor_row_cx_to_rx 记录当前视觉列 rx，
+              换行后 editor_row_rx_to_cx 把 rx 转回新行 cx
+     Why    : 从宽字符行移动到窄行，纯字节位置保持会导致光标
+              悬空在行尾之外或宽字符中间。
+
+Affected Files
+---------------------------------------------------------
+  src/common.c      —  1 行修正（范围收窄）
+  src/editor.c      —  约 60 行变更（5 处修复 + 1 前向声明）
+  src/input.c       —  约 30 行变更（4 处修复，死代码移除）
+
+=========================================================
+Revision 16 — 2026-05-17
+=========================================================
+
+Summary
+---------------------------------------------------------
+修复 editor_row_del_char 多字节字符逆向寻首字节条件错误，
+导致退格只删掉中文 2/3 字节、残留孤立前导字节引发终端
+渲染乱码（?[39m 字面显示）和光标错位及 Enter 连锁损坏。
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] src/editor.c — editor_row_del_char 逆向寻首字节条件修正
+    Before : while (start_at > 0 && (row->chars[start_at - 1] & 0xC0) == 0x80)
+             start_at--;
+    After  : while (start_at > 0 && ((unsigned char)row->chars[start_at] & 0xC0) == 0x80)
+             start_at--;
+    Why    : at == cursor_x - 1 恰好指向待删字符的末尾字节，
+             原条件检查 chars[start_at - 1]（已跳过了当前 start_at
+             所指的字节），导致对于 3 字节中文字符（如"好"=E5 A5 BD，
+             位置[3,4,5]，at=5）逆向扫描从位置4开始，漏掉位置4的
+             续字节 A5，最终 start_at=4 而非正确的 3。删除长度
+             del_len=2 而非 3，残留 E5（"好"的前导字节）。
+             残留的 E5 输出到终端后，终端尝试将其作为 3 字节 UTF-8
+             序列解码，将后续的 \x1b（ESC）误当作续字节消费，导致
+             \x1b[39m 中的 \x1b 被吃掉，[39m 字面显示为 ?[39m。
+             同时 cursor_x 被设为错误的 start_at(4)，后续 Enter
+             或输入从该错位出发继续损坏邻近行。
+
+Affected Files
+---------------------------------------------------------
+  src/editor.c            —  4 行变更（条件修正 + 注释 + cast）
+
+=========================================================
+Revision 17 — 2026-05-17
+=========================================================
+
+Summary
+---------------------------------------------------------
+修复水平滚动 col_off 落在多字节字符中间和行长截断在字符
+中间的两个 UTF-8 渲染 bug，防止终端吃 ESC 后字面显示 [39m。
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] src/render.c — editor_draw_rows: 逐行对齐 col_off 到字符边界
+    Before : 直接使用 ec->col_off（字节偏移）作为 render[] 起始索引
+    After  : 引入 render_off，当 col_off 落在续字节(10xxxxxx)上时，
+             逆向步进到该多字节字符的首字节
+    Why    : col_off 通过 editor_scroll 从 rx（display 列）计算而来。
+             对于多字节字符，display 列 ≠ 字节偏移。例如"你好"中
+             rx=2 对应到 render[2]=0xA0（"你"的末字节），从续字节
+             开始输出会产生非法 UTF-8 序列，终端无法解码后吃掉
+             紧随的 \x1b（ESC），导致 [39m 字面显示。
+
+[2] src/render.c — editor_draw_rows: 行末截断不跨字符
+    Before : len = min(available_cols, render_size - col_off)
+    After  : 截断后逆向扫描，如果最后一个字节是多字节字符内的
+             续字节或前导字节，则回退 len 到完整字符边界
+    Why    : 行长超过屏幕宽度时 truncation 可能切断多字节字符
+             的中间字节。终端收到残缺 UTF-8 序列 + 后续 \x1b[39m
+             时同样会吃掉 ESC 导致 [39m 显示。
+
+Affected Files
+---------------------------------------------------------
+  src/render.c            —  约 25 行变更（render_off 偏移 + 行末截断保护）

@@ -100,13 +100,35 @@ static void editor_draw_rows(AppendBuffer *ab, EditorConfig *ec)
             abuf_append(ab, ln_buf, ln_len);
 
             int available_cols = ec->screen_cols - ec->gutter_width - 1;
-            int len = ec->row[filerow].render_size - ec->col_off;
-            if (len < 0) len = 0;                 // 滚动太远 → 空行
-            if (len > available_cols) len = available_cols;  // 截断到可见宽度
 
-            int current_color = -1;               // 上次输出的 ANSI 色号（-1 = 默认色）
+            /* Align col_off to character boundary per row, then
+             * trim len so it doesn't end mid-UTF-8-byte-sequence.
+             * Otherwise partial multi-byte chars or embedded \x1b
+             * may be consumed by the terminal's UTF-8 decoder,
+             * corrupting subsequent ANSI escape output. */
+            int render_off = ec->col_off;
+            if (render_off > 0 && render_off < ec->row[filerow].render_size) {
+                while (render_off > 0 && ((unsigned char)ec->row[filerow].render[render_off] & 0xC0) == 0x80)
+                    render_off--;
+            }
+
+            int len = ec->row[filerow].render_size - render_off;
+            if (len < 0) len = 0;
+            if (len > available_cols) len = available_cols;
+
+            /* 截断到字符边界 */
+            if (len > 0) {
+                int end_pos = render_off + len;
+                while (end_pos > render_off && ((unsigned char)ec->row[filerow].render[end_pos - 1] & 0xC0) == 0x80)
+                    end_pos--;
+                if (end_pos > render_off && ((unsigned char)ec->row[filerow].render[end_pos - 1] & 0xC0) == 0xC0)
+                    end_pos--;
+                len = end_pos - render_off;
+            }
+
+            int current_color = -1;
             for (int j = 0; j < len; j++) {
-                int rx_index = ec->col_off + j;   // render-space 索引
+                int rx_index = render_off + j;
                 unsigned char hl = ec->row[filerow].high_light
                                    ? ec->row[filerow].high_light[rx_index]
                                    : HL_NORMAL;
@@ -222,7 +244,7 @@ void editor_refresh_screen(EditorConfig *ec)
     char buf[32];
     snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
              (ec->cursor_y - ec->row_off) + 1,
-             (rx - ec->col_off) + ec->gutter_width + 2);
+             (rx - ec->col_off) + ec->gutter_width + 1);
     abuf_append(&ab, buf, strlen(buf));
 
     abuf_append(&ab, "\x1b[?25h", 6);            // 显示光标

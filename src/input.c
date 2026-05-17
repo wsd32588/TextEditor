@@ -25,22 +25,45 @@
 // ============================================================
 
 static void editor_cursor_move_up(EditorConfig *ec) {
-    if (ec->cursor_y > 0) ec->cursor_y--;                    // 不越界即可
+    if (ec->cursor_y > 0) {
+        EditorRow *cur_row = &ec->row[ec->cursor_y];
+        int rx = editor_row_cx_to_rx(ec, cur_row, ec->cursor_x);
+        ec->cursor_y--;
+        ec->cursor_x = editor_row_rx_to_cx(ec, &ec->row[ec->cursor_y], rx);
+    }
 }
 
 static void editor_cursor_move_down(EditorConfig *ec) {
-    if (ec->cursor_y < ec->num_rows - 1) ec->cursor_y++;     // 不能超过最后行
+    if (ec->cursor_y < ec->num_rows - 1) {
+        EditorRow *cur_row = &ec->row[ec->cursor_y];
+        int rx = editor_row_cx_to_rx(ec, cur_row, ec->cursor_x);
+        ec->cursor_y++;
+        ec->cursor_x = editor_row_rx_to_cx(ec, &ec->row[ec->cursor_y], rx);
+    }
 }
 
 static void editor_cursor_move_right(EditorConfig *ec) {
     if (ec->cursor_y < ec->num_rows) {
         EditorRow *row = &ec->row[ec->cursor_y];
-        if (ec->cursor_x < row->size) ec->cursor_x++;        // 不能超过行尾
+        if (ec->cursor_x < row->size) {
+            int len = utf8_char_length((unsigned char)row->chars[ec->cursor_x]);
+            ec->cursor_x += len;
+            if (ec->cursor_x > row->size) ec->cursor_x = row->size;
+        }
     }
 }
 
 static void editor_cursor_move_left(EditorConfig *ec) {
-    if (ec->cursor_x > 0) ec->cursor_x--;                    // 不越界即可
+    if (ec->cursor_x > 0){
+        ec->cursor_x--;
+        EditorRow *row = &ec->row[ec->cursor_y];
+        while (ec->cursor_x > 0 && ((unsigned char)row->chars[ec->cursor_x] & 0xC0) == 0x80){
+            ec->cursor_x--;
+        }
+    }else if (ec->cursor_y > 0){
+        ec->cursor_y--;
+        ec->cursor_x = ec->row[ec->cursor_y].size;
+    }
 }
 
 // ============================================================
@@ -144,6 +167,6 @@ void editor_process_key(EditorConfig *ec) {
         }
     }
 
-    if (c >= 32 && c <= 126)
+    if (c >= 32 && c <= 255)
         editor_insert_char(ec, c);
 }

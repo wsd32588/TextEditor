@@ -155,5 +155,6 @@ enum EditorKeys {
 
 void *editor_safe_realloc(void *ptr, size_t size);
 char *editor_strdup(const char *s);
-
+int utf8_char_length(unsigned char c);
+int utf8_char_display_width(unsigned char c);
 #endif // TEXTEDITOR_COMMON_H

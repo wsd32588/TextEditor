@@ -120,7 +120,7 @@ static int terminal_read_char_timeout(EditorConfig *ec, char *c)
 
 int terminal_read_key(EditorConfig *ec) {
     DWORD bytes_read;
-    char c = '\0';
+    unsigned char c = '\0';
 
     /* 阻塞读取一个字节 */
     while (ReadFile(ec->hIN, &c, 1, &bytes_read, NULL)) {

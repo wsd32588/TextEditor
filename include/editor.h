@@ -15,6 +15,7 @@ char *editor_prompt(EditorConfig *ec, const char *prompt);
 void editor_find(EditorConfig *ec);
 void editor_find_next(EditorConfig *ec);
 int editor_row_cx_to_rx(EditorConfig *ec, EditorRow *row,int cx);
+int editor_row_rx_to_cx(EditorConfig *ec, EditorRow *row, int rx);
 void editor_update_row(EditorConfig *ec, EditorRow *row);
 void editor_free_all_row(EditorConfig *ec);
 
