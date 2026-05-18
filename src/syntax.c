@@ -139,108 +139,117 @@ const int g_high_light_data_base_entries =
 //  语法高亮更新
 // ============================================================
 
-void editor_update_syntax(EditorConfig *ec, EditorRow *row) {
+void editor_update_syntax(EditorConfig *ec, EditorRow *start_row) {
+    int current_idx = start_row - ec->row;
 
-    if (row->render_size == 0) {
-        free(row->high_light);
-        row->high_light = NULL;
-        return;
-    }
+    /* Iterate forward instead of recursing — avoids stack overflow on
+     * large files with long multi-line comment blocks. */
+    while (current_idx < ec->num_rows) {
+        EditorRow *row = &ec->row[current_idx];
 
-    row->high_light = editor_safe_realloc(row->high_light, row->render_size);
-    memset(row->high_light, HL_NORMAL, row->render_size);
+        int in_comment = (current_idx > 0 && ec->row[current_idx - 1].highlight_open_comment);
 
-    if (ec->syntax == NULL) return;
+        if (row->render_size == 0) {
+            free(row->high_light);
+            row->high_light = NULL;
+            int changed = (row->highlight_open_comment != in_comment);
+            row->highlight_open_comment = in_comment;
+            if (!changed) break;
+            current_idx++;
+            continue;
+        }
 
-    char **keywords = ec->syntax->keywords;
-    char *scs = ec->syntax->single_line_comment_start;
-    char *mcs = ec->syntax->multiline_comment_start;
-    char *mce = ec->syntax->multiline_comment_end;
+        row->high_light = editor_safe_realloc(row->high_light, row->render_size);
+        memset(row->high_light, HL_NORMAL, row->render_size);
 
-    int scs_len = scs ? strlen(scs) : 0;
-    int mcs_len = mcs ? strlen(mcs) : 0;
-    int mce_len = mce ? strlen(mce) : 0;
+        if (ec->syntax != NULL) {
+            char **keywords = ec->syntax->keywords;
+            char *scs = ec->syntax->single_line_comment_start;
+            char *mcs = ec->syntax->multiline_comment_start;
+            char *mce = ec->syntax->multiline_comment_end;
 
-    int idx = row - ec->row;
-    int in_comment = (idx > 0 && ec->row[idx - 1].highlight_open_comment);
+            int scs_len = scs ? strlen(scs) : 0;
+            int mcs_len = mcs ? strlen(mcs) : 0;
+            int mce_len = mce ? strlen(mce) : 0;
 
-    int prev_sep = 1;
-    int i = 0;
+            int prev_sep = 1;
+            int i = 0;
 
-    while (i < row->render_size) {
-        char c = row->render[i];
+            while (i < row->render_size) {
+                char c = row->render[i];
 
-        /* 多行注释状态机（最高优先级） */
-        if (mcs_len && mce_len) {
-            if (in_comment) {
-                row->high_light[i] = HL_ML_COMMENT;
-                if (!strncmp(&row->render[i], mce, mce_len)) {
-                    memset(&row->high_light[i], HL_ML_COMMENT, mce_len);
-                    i += mce_len;
-                    in_comment = 0;
-                    prev_sep = 1;
-                    continue;
+                /* 多行注释状态机 */
+                if (mcs_len && mce_len) {
+                    if (in_comment) {
+                        row->high_light[i] = HL_ML_COMMENT;
+                        if (!strncmp(&row->render[i], mce, mce_len)) {
+                            memset(&row->high_light[i], HL_ML_COMMENT, mce_len);
+                            i += mce_len;
+                            in_comment = 0;
+                            prev_sep = 1;
+                            continue;
+                        }
+                        i++;
+                        continue;
+                    } else if (!strncmp(&row->render[i], mcs, mcs_len)) {
+                        memset(&row->high_light[i], HL_ML_COMMENT, mcs_len);
+                        i += mcs_len;
+                        in_comment = 1;
+                        continue;
+                    }
                 }
-                i++;
-                continue;
-            } else if (!strncmp(&row->render[i], mcs, mcs_len)) {
-                memset(&row->high_light[i], HL_ML_COMMENT, mcs_len);
-                i += mcs_len;
-                in_comment = 1;
-                continue;
-            }
-        }
 
-        /* 单行注释检测 */
-        if (scs_len && !strncmp(&row->render[i], scs, scs_len)) {
-            memset(&row->high_light[i], HL_COMMENT, row->render_size - i);
-            break;
-        }
-
-        /* 词边界 → 匹配关键字 */
-        if (prev_sep) {
-            int keyword_match = 0;
-            for (int j = 0; keywords[j]; j++) {
-                int klen = strlen(keywords[j]);
-                int kw2 = keywords[j][klen - 1] == '|';
-                if (kw2) klen--;
-
-                if (!strncmp(&row->render[i], keywords[j], klen)
-                    && is_separator(row->render[i + klen])) {
-                    memset(&row->high_light[i], kw2 ? HL_KEYWORD2 : HL_KEYWORD1, klen);
-                    i += klen;
-                    keyword_match = 1;
+                /* 单行注释检测 */
+                if (scs_len && !strncmp(&row->render[i], scs, scs_len)) {
+                    memset(&row->high_light[i], HL_COMMENT, row->render_size - i);
                     break;
                 }
+
+                /* 词边界 → 匹配关键字 */
+                if (prev_sep) {
+                    int keyword_match = 0;
+                    for (int j = 0; keywords[j]; j++) {
+                        int klen = strlen(keywords[j]);
+                        int kw2 = keywords[j][klen - 1] == '|';
+                        if (kw2) klen--;
+
+                        if (!strncmp(&row->render[i], keywords[j], klen)
+                            && is_separator(row->render[i + klen])) {
+                            memset(&row->high_light[i], kw2 ? HL_KEYWORD2 : HL_KEYWORD1, klen);
+                            i += klen;
+                            keyword_match = 1;
+                            break;
+                        }
+                    }
+                    if (keyword_match) {
+                        prev_sep = 0;
+                        continue;
+                    }
+                }
+                prev_sep = is_separator(c);
+                i++;
             }
-            if (keyword_match) {
-                prev_sep = 0;
-                continue;
+        } // end if (ec->syntax != NULL)
+
+        /* 搜索匹配高亮 */
+        if (ec->search_query != NULL) {
+            int query_len = strlen(ec->search_query);
+            if (query_len > 0) {
+                char *match = row->render;
+                while ((match = strstr(match, ec->search_query)) != NULL) {
+                    int match_idx = match - row->render;
+                    memset(&row->high_light[match_idx], HL_MATCH, query_len);
+                    match += query_len;
+                }
             }
         }
 
-        prev_sep = is_separator(c);
-        i++;
-    }
+        /* 状态比对：无变化则停止向下传播 */
+        int changed = (row->highlight_open_comment != in_comment);
+        row->highlight_open_comment = in_comment;
+        if (!changed) break;
 
-    /* 搜索匹配高亮（覆盖关键字/注释颜色） */
-    if (ec->search_query != NULL) {
-        int query_len = strlen(ec->search_query);
-        if (query_len > 0) {
-            char *match = row->render;
-            while ((match = strstr(match, ec->search_query)) != NULL) {
-                int match_idx = match - row->render;
-                memset(&row->high_light[match_idx], HL_MATCH, query_len);
-                match += query_len;
-            }
-        }
-    }
-
-    /* 多行注释状态向下传染 */
-    int changed = (row->highlight_open_comment != in_comment);
-    row->highlight_open_comment = in_comment;
-    if (changed && idx + 1 < ec->num_rows) {
-        editor_update_syntax(ec, &ec->row[idx + 1]);
+        current_idx++;
     }
 }
 

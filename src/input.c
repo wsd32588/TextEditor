@@ -14,11 +14,9 @@
 #include "editor.h"
 #include "terminal.h"
 #include "fileio.h"
-#include "editor.h"
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "syntax.h"
 
 // ============================================================
 //  光标移动
@@ -121,7 +119,6 @@ static void editor_quick_open(EditorConfig *ec){
     editor_open(ec,new_filename);
     free(new_filename);
 
-    editor_select_syntax_highlight(ec);
     editor_set_status_message(ec,"Open complete! Successfully loaded file.");
 }
 

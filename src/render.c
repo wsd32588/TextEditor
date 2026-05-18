@@ -3,7 +3,7 @@
  * and text, then flushes it to the console in one WriteFile call.
  *
  * Draw order (top to bottom):
- *   editor_draw_rows      — text lines with line numbers + colour
+ *   editor_draw_rows      — text lines with line numbers + color
  *   editor_draw_status_bar — file name / row count / cursor position
  *   editor_draw_message_bar — ephemeral status messages (5 s timeout)
  *
@@ -101,29 +101,33 @@ static void editor_draw_rows(AppendBuffer *ab, EditorConfig *ec)
 
             int available_cols = ec->screen_cols - ec->gutter_width - 1;
 
-            /* Align col_off to character boundary per row, then
-             * trim len so it doesn't end mid-UTF-8-byte-sequence.
-             * Otherwise partial multi-byte chars or embedded \x1b
-             * may be consumed by the terminal's UTF-8 decoder,
-             * corrupting subsequent ANSI escape output. */
-            int render_off = ec->col_off;
-            if (render_off > 0 && render_off < ec->row[filerow].render_size) {
-                while (render_off > 0 && ((unsigned char)ec->row[filerow].render[render_off] & 0xC0) == 0x80)
-                    render_off--;
+            /* Walk render[] by visual columns: map col_off (rx) → byte offset,
+             * then measure how many bytes fit within available_cols without
+             * breaking a multi-byte character at either boundary. */
+            int render_off = 0;
+            int current_rx = 0;
+            while (render_off < ec->row[filerow].render_size && current_rx < ec->col_off) {
+                unsigned char c = ec->row[filerow].render[render_off];
+                int char_len = 1;
+                while (render_off + char_len < ec->row[filerow].render_size &&
+                       ((unsigned char)ec->row[filerow].render[render_off + char_len] & 0xC0) == 0x80)
+                    char_len++;
+                if ((c & 0xC0) != 0x80) current_rx += utf8_char_display_width(c);
+                render_off += char_len;
             }
 
-            int len = ec->row[filerow].render_size - render_off;
-            if (len < 0) len = 0;
-            if (len > available_cols) len = available_cols;
-
-            /* 截断到字符边界 */
-            if (len > 0) {
-                int end_pos = render_off + len;
-                while (end_pos > render_off && ((unsigned char)ec->row[filerow].render[end_pos - 1] & 0xC0) == 0x80)
-                    end_pos--;
-                if (end_pos > render_off && ((unsigned char)ec->row[filerow].render[end_pos - 1] & 0xC0) == 0xC0)
-                    end_pos--;
-                len = end_pos - render_off;
+            int len = 0;
+            int printed_rx = 0;
+            while (render_off + len < ec->row[filerow].render_size) {
+                unsigned char c = ec->row[filerow].render[render_off + len];
+                int char_len = 1;
+                while (render_off + len + char_len < ec->row[filerow].render_size &&
+                       ((unsigned char)ec->row[filerow].render[render_off + len + char_len] & 0xC0) == 0x80)
+                    char_len++;
+                int w = ((c & 0xC0) != 0x80) ? utf8_char_display_width(c) : 0;
+                if (printed_rx + w > available_cols) break;
+                printed_rx += w;
+                len += char_len;
             }
 
             int current_color = -1;
@@ -244,7 +248,7 @@ void editor_refresh_screen(EditorConfig *ec)
     char buf[32];
     snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
              (ec->cursor_y - ec->row_off) + 1,
-             (rx - ec->col_off) + ec->gutter_width + 1);
+             (rx - ec->col_off) + ec->gutter_width + 2);
     abuf_append(&ab, buf, strlen(buf));
 
     abuf_append(&ab, "\x1b[?25h", 6);            // 显示光标

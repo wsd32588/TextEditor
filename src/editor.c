@@ -18,8 +18,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-void editor_row_del_char(EditorConfig *ec, EditorRow *row, int at);
-
 // ============================================================
 //  编辑器初始化
 // ============================================================
@@ -217,26 +215,18 @@ void editor_insert_char(EditorConfig *ec, int c) {
 
     //如果开启了覆盖模式，且光标没有越界，直接原地覆写
     if (ec->overwrite_mode && ec->cursor_x < row->size){
-        unsigned char old_c = (unsigned char)row->chars[ec->cursor_x];
-        int old_len = utf8_char_length(old_c);
-        if (ec->cursor_x + old_len > row->size)
-            old_len = row->size - ec->cursor_x;
+        if ((c & 0xC0) != 0x80){
+            unsigned char old_c = (unsigned char)row->chars[ec->cursor_x];
+            int old_len = utf8_char_length(old_c);
+            if (ec->cursor_x + old_len > row->size)
+                old_len = row->size - ec->cursor_x;
 
-        /* 如果旧字符占多字节，删掉多余后缀字节（保留 1 字节留给新值覆写） */
-        if (old_len > 1) {
-            int tail = row->size - ec->cursor_x - old_len + 1;  // 含 '\0'
-            memmove(&row->chars[ec->cursor_x + 1],
-                    &row->chars[ec->cursor_x + old_len], tail);
-            row->size -= (old_len - 1);
+            memmove(&row->chars[ec->cursor_x], &row->chars[ec->cursor_x + old_len], row->size - ec->cursor_x - old_len + 1);
+            row->size -= old_len;
         }
-        row->chars[ec->cursor_x] = c;
-        editor_update_row(ec, row);
-        ec->cursor_x++;
-        ec->dirty++;
-    } else {
-        editor_row_insert_char(ec, row, ec->cursor_x, c);
-        ec->cursor_x++;
     }
+    editor_row_insert_char(ec,row,ec->cursor_x,c);
+    ec->cursor_x++;
 }
 
 // ============================================================
@@ -485,18 +475,26 @@ void editor_find(EditorConfig *ec) {
     for (int i = 0; i < ec->num_rows; i++)
         editor_update_syntax(ec, &ec->row[i]);
 
-    /* 环形搜索：从当前行往下找，找到就跳转 */
-    int current = ec->cursor_y;              // 搜素起点（从下一行开始）
-    for (int i = 0; i < ec->num_rows; i++) {
-        current += 1;
-        if (current >= ec->num_rows) current = 0;  // 绕回开头
-        EditorRow *row = &ec->row[current];
-        char *match = strstr(row->chars, query);    // chars-space 匹配
-        if (match) {
-            ec->cursor_y = current;
-            ec->cursor_x = (int)(match - row->chars);  // chars-space 索引
-            ec->row_off = ec->cursor_y;
-            break;
+    /* 1. 优先搜索当前行光标之后 */
+    EditorRow *cur = &ec->row[ec->cursor_y];
+    char *match = strstr(cur->chars + ec->cursor_x, query);
+    if (match) {
+        ec->cursor_x = (int)(match - cur->chars);
+        ec->row_off = ec->cursor_y;
+    } else {
+        /* 2. 跨行环形搜索：从下一行开始，绕回当前行 */
+        int current = ec->cursor_y;
+        for (int i = 0; i < ec->num_rows; i++) {
+            current += 1;
+            if (current >= ec->num_rows) current = 0;
+            EditorRow *row = &ec->row[current];
+            match = strstr(row->chars, query);
+            if (match) {
+                ec->cursor_y = current;
+                ec->cursor_x = (int)(match - row->chars);
+                ec->row_off = ec->cursor_y;
+                break;
+            }
         }
     }
 }
