@@ -2,11 +2,37 @@
 #define TEXTEDITOR_COMMON_H
 
 #include <Windows.h>
+#include <stdint.h>
 #include <time.h>
 
 // ============================================================
 //  语法高亮类型
 // ============================================================
+
+typedef struct
+{
+    uint32_t codepoint;  // Unicode 码点
+    int byte_len;        // 这个字符占几个字节
+    int display_width;   // 终端视觉宽度
+}Utf8Char;
+
+Utf8Char utf8_decode(const char *s,int s_len);
+
+typedef struct {
+    int bytes;   // byte_len
+    int cols;    // display_width
+} Utf8Step;
+
+Utf8Step utf8_step(const char *s, int s_len);
+
+typedef struct {
+    uint32_t codepoint;    // Unicode 码点 (用于识别字符)
+    uint8_t  byte_len;     // 原文占用的字节数 (制表符占位填0)
+    uint8_t  display_width;// 终端视觉宽度 (1或2)
+    uint8_t  hl;           // 语法高亮颜色 (HL_NORMAL 等)
+} RenderCell;
+
+int utf8_encode(uint32_t cp,char *out);
 
 typedef enum {
     HL_NORMAL = 0,
@@ -51,19 +77,18 @@ struct EditorSyntax {
  * One line of text and its display derivatives.
  *
  * Data flow:  input → chars → editor_update_row()
- *                   ├── render[]  (tabs → spaces, sized render_size)
+ *                   ├── cells[]  (RenderCell array, tabs → space cells)
  *                   └── editor_update_syntax()
- *                        └── high_light[]  (per-byte colour, sized render_size)
+ *                        └── cells[].hl  (per-cell colour)
  *
  * Invariant: after any chars mutation, editor_update_row() must run
- * to rebuild render[] and re-trigger highlighting.
+ * to rebuild cells[] and re-trigger highlighting.
  */
 typedef struct {
     int size;                  // chars 字节数（逻辑长度，\t 算 1 字节）
-    int render_size;           // render 字节数（物理长度，\t 已展开）
     char *chars;               // 原始文本（含 \t）
-    char *render;              // 显示用文本（\t → 空格）
-    unsigned char *high_light; // 颜色标记数组（render-space 索引）
+    int cell_count;             // cells 数组长度
+    RenderCell *cells;          // 渲染单元数组（\t 展开为空格 cell，byte_len=0）
     int highlight_open_comment; // 上行是否有未闭合多行注释
 } EditorRow;
 
@@ -135,7 +160,7 @@ typedef struct {
 enum EditorKeys {
     KEY_NULL = 0,
     KEY_CTRL_C = 3,   KEY_CTRL_D = 4,   KEY_CTRL_F = 6,   KEY_CTRL_G = 7,
-    KEY_CTRL_H = 8,   KEY_CTRL_P = 16,
+    KEY_CTRL_H = 8,   KEY_CTRL_J = 10,  KEY_CTRL_P = 16,
     KEY_TAB = 9,
     KEY_ENTER = 13,
     KEY_CTRL_Q = 17,  KEY_CTRL_S = 19,  KEY_CTRL_U = 21,

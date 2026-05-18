@@ -5,8 +5,8 @@
  * editor_select_syntax_highlight() picks the right entry by
  * filename suffix and sets ec->tab_stop accordingly.
  *
- * editor_update_syntax() annotates row->high_light[] (render-space)
- * with colour tags by scanning row->render[]:
+ * editor_update_syntax() annotates row->cells[].hl with colour tags
+ * by scanning the cell array:
  *   1. Multiline comments (slash-star ... star-slash) are handled via
  *      a state machine that inherits highlight_open_comment from the
  *      previous row, with recursive re-highlight on state change.
@@ -86,10 +86,6 @@ static char *js_keywords[] = {
     "true|", "false|", "null|", "undefined|", "NaN|", "Infinity|", NULL
 };
 
-static int is_separator(int c) {
-    return isspace(c) || c == '\0' || strchr(",.()+-/*=~%<>[];", c) != NULL;
-}
-
 // ============================================================
 //  高亮数据库
 // ============================================================
@@ -139,19 +135,27 @@ const int g_high_light_data_base_entries =
 //  语法高亮更新
 // ============================================================
 
+static int cell_is_sep(uint32_t cp) {
+    if (cp > 127) return 0;
+    return isspace((int)cp) || strchr(",.()+-/*=~%<>[];", (int)cp) != NULL;
+}
+
+static int cell_match_seq(RenderCell *cells, int start, int count, const char *seq, int seq_len) {
+    if (start + seq_len > count) return 0;
+    for (int k = 0; k < seq_len; k++)
+        if (cells[start + k].codepoint != (unsigned char)seq[k]) return 0;
+    return 1;
+}
+
 void editor_update_syntax(EditorConfig *ec, EditorRow *start_row) {
     int current_idx = start_row - ec->row;
 
-    /* Iterate forward instead of recursing — avoids stack overflow on
-     * large files with long multi-line comment blocks. */
     while (current_idx < ec->num_rows) {
         EditorRow *row = &ec->row[current_idx];
 
         int in_comment = (current_idx > 0 && ec->row[current_idx - 1].highlight_open_comment);
 
-        if (row->render_size == 0) {
-            free(row->high_light);
-            row->high_light = NULL;
+        if (row->cell_count == 0) {
             int changed = (row->highlight_open_comment != in_comment);
             row->highlight_open_comment = in_comment;
             if (!changed) break;
@@ -159,8 +163,8 @@ void editor_update_syntax(EditorConfig *ec, EditorRow *start_row) {
             continue;
         }
 
-        row->high_light = editor_safe_realloc(row->high_light, row->render_size);
-        memset(row->high_light, HL_NORMAL, row->render_size);
+        for (int i = 0; i < row->cell_count; i++)
+            row->cells[i].hl = HL_NORMAL;
 
         if (ec->syntax != NULL) {
             char **keywords = ec->syntax->keywords;
@@ -175,15 +179,16 @@ void editor_update_syntax(EditorConfig *ec, EditorRow *start_row) {
             int prev_sep = 1;
             int i = 0;
 
-            while (i < row->render_size) {
-                char c = row->render[i];
+            while (i < row->cell_count) {
+                uint32_t cp = row->cells[i].codepoint;
 
                 /* 多行注释状态机 */
                 if (mcs_len && mce_len) {
                     if (in_comment) {
-                        row->high_light[i] = HL_ML_COMMENT;
-                        if (!strncmp(&row->render[i], mce, mce_len)) {
-                            memset(&row->high_light[i], HL_ML_COMMENT, mce_len);
+                        row->cells[i].hl = HL_ML_COMMENT;
+                        if (cell_match_seq(row->cells, i, row->cell_count, mce, mce_len)) {
+                            for (int k = 0; k < mce_len; k++)
+                                row->cells[i + k].hl = HL_ML_COMMENT;
                             i += mce_len;
                             in_comment = 0;
                             prev_sep = 1;
@@ -191,8 +196,9 @@ void editor_update_syntax(EditorConfig *ec, EditorRow *start_row) {
                         }
                         i++;
                         continue;
-                    } else if (!strncmp(&row->render[i], mcs, mcs_len)) {
-                        memset(&row->high_light[i], HL_ML_COMMENT, mcs_len);
+                    } else if (cell_match_seq(row->cells, i, row->cell_count, mcs, mcs_len)) {
+                        for (int k = 0; k < mcs_len; k++)
+                            row->cells[i + k].hl = HL_ML_COMMENT;
                         i += mcs_len;
                         in_comment = 1;
                         continue;
@@ -200,33 +206,39 @@ void editor_update_syntax(EditorConfig *ec, EditorRow *start_row) {
                 }
 
                 /* 单行注释检测 */
-                if (scs_len && !strncmp(&row->render[i], scs, scs_len)) {
-                    memset(&row->high_light[i], HL_COMMENT, row->render_size - i);
+                if (scs_len && cell_match_seq(row->cells, i, row->cell_count, scs, scs_len)) {
+                    for (int k = i; k < row->cell_count; k++)
+                        row->cells[k].hl = HL_COMMENT;
                     break;
                 }
 
                 /* 词边界 → 匹配关键字 */
-                if (prev_sep) {
+                if (prev_sep && cp < 128) {
                     int keyword_match = 0;
                     for (int j = 0; keywords[j]; j++) {
                         int klen = strlen(keywords[j]);
                         int kw2 = keywords[j][klen - 1] == '|';
                         if (kw2) klen--;
+                        if (i + klen > row->cell_count) continue;
 
-                        if (!strncmp(&row->render[i], keywords[j], klen)
-                            && is_separator(row->render[i + klen])) {
-                            memset(&row->high_light[i], kw2 ? HL_KEYWORD2 : HL_KEYWORD1, klen);
+                        int match = 1;
+                        for (int k = 0; k < klen; k++) {
+                            if (row->cells[i + k].codepoint != (unsigned char)keywords[j][k]) {
+                                match = 0; break;
+                            }
+                        }
+                        if (match && (i + klen == row->cell_count ||
+                                      cell_is_sep(row->cells[i + klen].codepoint))) {
+                            for (int k = 0; k < klen; k++)
+                                row->cells[i + k].hl = kw2 ? HL_KEYWORD2 : HL_KEYWORD1;
                             i += klen;
                             keyword_match = 1;
                             break;
                         }
                     }
-                    if (keyword_match) {
-                        prev_sep = 0;
-                        continue;
-                    }
+                    if (keyword_match) { prev_sep = 0; continue; }
                 }
-                prev_sep = is_separator(c);
+                prev_sep = cell_is_sep(cp);
                 i++;
             }
         } // end if (ec->syntax != NULL)
@@ -234,17 +246,23 @@ void editor_update_syntax(EditorConfig *ec, EditorRow *start_row) {
         /* 搜索匹配高亮 */
         if (ec->search_query != NULL) {
             int query_len = strlen(ec->search_query);
-            if (query_len > 0) {
-                char *match = row->render;
-                while ((match = strstr(match, ec->search_query)) != NULL) {
-                    int match_idx = match - row->render;
-                    memset(&row->high_light[match_idx], HL_MATCH, query_len);
-                    match += query_len;
+            if (query_len > 0 && query_len <= row->cell_count) {
+                for (int i = 0; i <= row->cell_count - query_len; i++) {
+                    int match = 1;
+                    for (int k = 0; k < query_len; k++) {
+                        if (row->cells[i + k].codepoint != (unsigned char)ec->search_query[k]) {
+                            match = 0; break;
+                        }
+                    }
+                    if (match) {
+                        for (int k = 0; k < query_len; k++)
+                            row->cells[i + k].hl = HL_MATCH;
+                        i += query_len - 1;
+                    }
                 }
             }
         }
 
-        /* 状态比对：无变化则停止向下传播 */
         int changed = (row->highlight_open_comment != in_comment);
         row->highlight_open_comment = in_comment;
         if (!changed) break;

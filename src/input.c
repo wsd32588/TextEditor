@@ -44,21 +44,25 @@ static void editor_cursor_move_right(EditorConfig *ec) {
     if (ec->cursor_y < ec->num_rows) {
         EditorRow *row = &ec->row[ec->cursor_y];
         if (ec->cursor_x < row->size) {
-            int len = utf8_char_length((unsigned char)row->chars[ec->cursor_x]);
-            ec->cursor_x += len;
+            Utf8Step s = utf8_step(&row->chars[ec->cursor_x], row->size - ec->cursor_x);
+            ec->cursor_x += s.bytes;
             if (ec->cursor_x > row->size) ec->cursor_x = row->size;
         }
     }
 }
 
 static void editor_cursor_move_left(EditorConfig *ec) {
-    if (ec->cursor_x > 0){
-        ec->cursor_x--;
+    if (ec->cursor_x > 0) {
         EditorRow *row = &ec->row[ec->cursor_y];
-        while (ec->cursor_x > 0 && ((unsigned char)row->chars[ec->cursor_x] & 0xC0) == 0x80){
-            ec->cursor_x--;
+        int j = 0;
+        int prev_start = 0;
+        while (j < ec->cursor_x && j < row->size) {
+            prev_start = j;
+            Utf8Step s = utf8_step(&row->chars[j], row->size - j);
+            j += s.bytes;
         }
-    }else if (ec->cursor_y > 0){
+        ec->cursor_x = prev_start;
+    } else if (ec->cursor_y > 0) {
         ec->cursor_y--;
         ec->cursor_x = ec->row[ec->cursor_y].size;
     }
@@ -145,7 +149,8 @@ static const KeyBinding g_key_bindings[] = {
     {KEY_CTRL_F,      editor_find},
     {KEY_CTRL_G,      editor_find_next},
     {KEY_INS,         editor_toggle_overwrite},
-    {KEY_CTRL_P,editor_quick_open}
+    {KEY_CTRL_P,editor_quick_open},
+    {KEY_CTRL_J,editor_goto_line}
 };
 
 static const int g_bindings_count = sizeof(g_key_bindings) / sizeof(g_key_bindings[0]);

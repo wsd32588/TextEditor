@@ -1,10 +1,10 @@
 =========================================================
 Fix Log - TextEditor Project
 =========================================================
-Date      : 2026-05-14 — 2026-05-17
+Date      : 2026-05-14 — 2026-05-19
 Author    : Claude Code (AI assistant)
 =========================================================
-Revisions : 15
+Revisions : 18
 
 =========================================================
 Revision 1 — 2026-05-14
@@ -857,3 +857,105 @@ Detail
 Affected Files
 ---------------------------------------------------------
   src/render.c            —  约 25 行变更（render_off 偏移 + 行末截断保护）
+
+=========================================================
+Revision 18 — 2026-05-19
+=========================================================
+
+Summary
+---------------------------------------------------------
+架构升级：引入 UTF-8 解码层 (Utf8Char/Utf8Step) 和
+RenderCell 渲染单元，EditorRow 从字节缓冲 (render[]/
+high_light[]) 迁移至 cell 数组，消除应用层裸位运算。
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] common.h + common.c — 新增 UTF-8 工具层
+    Added   : Utf8Char {codepoint, byte_len, display_width}
+              Utf8Step {bytes, cols} — 轻量下标推进 wrapper
+              RenderCell {codepoint, byte_len, display_width, hl}
+              utf8_decode() — 字节→码点的一次性解码
+              utf8_step()  — decode 后直接返回 {bytes, cols}
+              utf8_encode() — 码点→UTF-8 字节编码
+    Removed : utf8_char_length(), utf8_char_display_width()
+    Why     : 旧方案每处调用都要 (c & 0xC0) != 0x80 判断
+              前导/续字节，分散在 5 个文件 15+ 处，技术债
+              增速最快。统一入口后应用层裸位运算从 15 处
+              减至 2 处（仅 overwrite 单字节判断 + prompt
+              退格逆向扫描）。
+
+[2] common.h — EditorRow 结构体重构
+    Before  : int render_size; char *render; unsigned char *high_light;
+    After   : int cell_count;  RenderCell *cells;
+    Why     : render[] 是字节缓冲，render index ≠ visual index；
+              high_light[] 是 per-byte 着色。未来 combining char /
+              grapheme cluster / emoji sequence 会彻底炸。
+              RenderCell 将 codepoint / display_width / hl 聚合
+              为一个渲染单元，display loop 直接按 cell 输出。
+
+[3] editor.c — 全链路适配 cells[]
+    - editor_update_row 重写：两遍遍历，第一遍数 cell，
+      第二遍填 RenderCell。制表符展开为 byte_len=0 的空格 cell
+    - editor_insert_raw / editor_free_all_row / editor_delChar /
+      editor_deleteCharAtCursor：free(render)+free(high_light)
+      → free(cells)
+    - editor_row_cx_to_rx / editor_row_rx_to_cx：utf8_step 替代
+      (c & 0xC0) 裸位运算
+    - editor_row_del_char：正向 utf8_step 扫描替代逆向位运算
+      找字符边界
+    - editor_deleteCharAtCursor / editor_insert_char overwrite：
+      utf8_step 替代 utf8_char_length
+
+[4] render.c — Display loop 改为 cell 遍历
+    - editor_draw_rows：cell_start 按 display_width 跳过 col_off
+      个视觉列；cell_n 按 display_width 累加到 available_cols；
+      输出时 utf8_encode(cell.codepoint) → UTF-8 字节
+    - 旧方案逐字节读 render[] 并逐字节查 high_light[]；
+      新方案逐 cell 迭代，cell.hl 直接取色
+
+[5] syntax.c — 语法高亮从字节级重写为 cell 级
+    Added   : cell_is_sep() — 基于 codepoint 的分隔符判断
+              cell_match_seq() — 注释分隔符匹配 (//, /*, */, #)
+    Changed : 关键字匹配从 strncmp(render bytes) 改为逐 cell
+              codepoint 比对；搜索匹配从 strstr(render bytes)
+              改为逐 cell 滑动窗口比对
+    Removed : is_separator() — 被 cell_is_sep 替代
+    Why     : render[] 消失后语法高亮必须直接操作 cells
+
+[6] input.c — 光标移动适配
+    - editor_cursor_move_right：utf8_step 替代 utf8_char_length
+    - editor_cursor_move_left：正向 utf8_step 扫描替代逆向
+      (c & 0xC0) 位运算找字符边界
+
+[7] main.c — 移除冗余 VT 初始化
+    Removed : enable_raw_mode 之前的 ENABLE_VIRTUAL_TERMINAL_
+              PROCESSING + ENABLE_VIRTUAL_TERMINAL_INPUT 手动设置
+    Why     : enable_raw_mode 已完整覆盖，且 main.c 先改模式
+              导致 enable_raw_mode 保存的"原始模式"实际是修改后
+              的模式，quit 恢复时残留 VT 处理标志。
+
+[8] 新增功能：Ctrl+J 行号跳转 (editor_goto_line)
+    Added   : KEY_CTRL_J = 10, editor_goto_line 实现 + 绑定
+    Why     : 基础编辑器功能，实现简单（atoi + 边界钳位）
+
+[9] 代码质量修正
+    - editor_row_del_char 返回 int（旧字符首字节位置），
+      调用方 editor_delChar 显式赋值 ec->cursor_x
+    - editor_find 优先搜索当前行光标之后，再跨行环形搜索
+    - editor_prompt 退格 UTF-8 扫描加 del_len < 4 上限
+    - input.c 移除重复 #include "editor.h" 和 #include "syntax.h"
+    - input.c 移除 editor_quick_open 中冗余的 syntax_select 调用
+    - render.c 光标定位 gutter_width+1 → gutter_width+2 修复偏差一列
+    - syntax.c editor_update_syntax 递归 → while 迭代，防大文件栈溢出
+
+Affected Files
+---------------------------------------------------------
+  include/common.h      —  39 行变更（新增类型 + struct 重构）
+  include/editor.h      —   3 行变更（row_del_char 签名 + goto_line）
+  src/common.c          —  77 行变更（utf8_decode/encode/step）
+  src/editor.c          — 190 行变更（cells 迁移 + 坐标转换重写）
+  src/render.c          —  54 行变更（cell 级 display loop）
+  src/syntax.c          —  94 行变更（cell 级语法高亮）
+  src/input.c           —  21 行变更（cursor move + goto_line）
+  src/Main/main.c       —  15 行删除（冗余 VT 初始化）

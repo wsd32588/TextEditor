@@ -8,8 +8,8 @@
  *   editor_draw_message_bar — ephemeral status messages (5 s timeout)
  *
  * Horizontal scrolling uses render-space coordinates: col_off is a
- * byte offset into row->render[] (tabs already expanded), so the
- * display loop simply reads render[col_off + j] without any live
+ * visual-column offset into the cells[] array (tabs already expanded),
+ * so the display loop simply iterates cells without any live
  * tab expansion.
  */
 #include "common.h"
@@ -101,59 +101,49 @@ static void editor_draw_rows(AppendBuffer *ab, EditorConfig *ec)
 
             int available_cols = ec->screen_cols - ec->gutter_width - 1;
 
-            /* Walk render[] by visual columns: map col_off (rx) → byte offset,
-             * then measure how many bytes fit within available_cols without
-             * breaking a multi-byte character at either boundary. */
-            int render_off = 0;
+            /* Walk cells[] by visual columns: map col_off → cell index,
+             * then measure how many cells fit within available_cols. */
+            int cell_start = 0;
             int current_rx = 0;
-            while (render_off < ec->row[filerow].render_size && current_rx < ec->col_off) {
-                unsigned char c = ec->row[filerow].render[render_off];
-                int char_len = 1;
-                while (render_off + char_len < ec->row[filerow].render_size &&
-                       ((unsigned char)ec->row[filerow].render[render_off + char_len] & 0xC0) == 0x80)
-                    char_len++;
-                if ((c & 0xC0) != 0x80) current_rx += utf8_char_display_width(c);
-                render_off += char_len;
+            while (cell_start < ec->row[filerow].cell_count && current_rx < ec->col_off) {
+                current_rx += ec->row[filerow].cells[cell_start].display_width;
+                cell_start++;
             }
 
-            int len = 0;
+            int cell_n = 0;
             int printed_rx = 0;
-            while (render_off + len < ec->row[filerow].render_size) {
-                unsigned char c = ec->row[filerow].render[render_off + len];
-                int char_len = 1;
-                while (render_off + len + char_len < ec->row[filerow].render_size &&
-                       ((unsigned char)ec->row[filerow].render[render_off + len + char_len] & 0xC0) == 0x80)
-                    char_len++;
-                int w = ((c & 0xC0) != 0x80) ? utf8_char_display_width(c) : 0;
+            while (cell_start + cell_n < ec->row[filerow].cell_count) {
+                int w = ec->row[filerow].cells[cell_start + cell_n].display_width;
                 if (printed_rx + w > available_cols) break;
                 printed_rx += w;
-                len += char_len;
+                cell_n++;
             }
 
             int current_color = -1;
-            for (int j = 0; j < len; j++) {
-                int rx_index = render_off + j;
-                unsigned char hl = ec->row[filerow].high_light
-                                   ? ec->row[filerow].high_light[rx_index]
-                                   : HL_NORMAL;
+            for (int i = 0; i < cell_n; i++) {
+                RenderCell *cell = &ec->row[filerow].cells[cell_start + i];
+                unsigned char hl = cell->hl;
 
                 if (hl == HL_NORMAL) {
-                    if (current_color != -1) {     // 切回默认色
+                    if (current_color != -1) {
                         abuf_append(ab, "\x1b[39m", 5);
                         current_color = -1;
                     }
                 } else {
                     int color = editor_syntax_to_color(hl);
-                    if (color != current_color) {  // 切换 ANSI 颜色
+                    if (color != current_color) {
                         char buf[16];
                         int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", color);
                         abuf_append(ab, buf, clen);
                         current_color = color;
                     }
                 }
-                abuf_append(ab, &ec->row[filerow].render[rx_index], 1);
+
+                char encoded[5];
+                int elen = utf8_encode(cell->codepoint, encoded);
+                abuf_append(ab, encoded, elen);
             }
-            abuf_append(ab, "\x1b[39m", 5);       // 复位颜色
+            abuf_append(ab, "\x1b[39m", 5);
         } else {
             ln_len = snprintf(ln_buf, sizeof(ln_buf), "\x1b[36m%*s \x1b[39m",
                               ec->gutter_width, "~");

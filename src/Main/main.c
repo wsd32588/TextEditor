@@ -17,21 +17,6 @@ int main(int argc, char *argv[])
 {
     EditorConfig ec = {0};
 
-    HANDLE hOUT = GetStdHandle(STD_OUTPUT_HANDLE);
-    ec.hOUT = hOUT;
-    DWORD dwMode = 0;
-    if (GetConsoleMode(hOUT, &dwMode)) {
-        dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-        SetConsoleMode(hOUT, dwMode);
-    }
-
-    HANDLE hIN = GetStdHandle(STD_INPUT_HANDLE);
-    ec.hIN = hIN;
-    if (GetConsoleMode(hIN, &dwMode)) {
-        dwMode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
-        SetConsoleMode(hIN, dwMode);
-    }
-
     enable_raw_mode(&ec);
     editor_init(&ec);
 

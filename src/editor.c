@@ -51,8 +51,7 @@ void editor_init(EditorConfig *ec) {
 void editor_free_all_row(EditorConfig *ec){
     for (int i = 0; i < ec->num_rows; i++){
         free(ec->row[i].chars);
-        free(ec->row[i].render);
-        free(ec->row[i].high_light);
+        free(ec->row[i].cells);
     }
     free(ec->row);
     ec->row = NULL;
@@ -71,35 +70,38 @@ void editor_free_all_row(EditorConfig *ec){
 
 int editor_row_cx_to_rx(EditorConfig *ec, EditorRow *row, int cx)
 {
-    int rx = 0;                         // 累加器：render-space 列号
-    for (int j = 0; j < cx; j++)
-    {
-        unsigned char c = (unsigned char)row->chars[j];
-        if (c == '\t'){
-            rx += (ec->tab_stop - 1) - (rx % ec->tab_stop) + 1;  // 跳到下个制表位
-        }else if ((c & 0xC0) != 0x80){
-            rx += utf8_char_display_width(c);
+    int rx = 0;
+    int j = 0;
+    while (j < cx && j < row->size) {
+        if (row->chars[j] == '\t') {
+            rx += (ec->tab_stop - 1) - (rx % ec->tab_stop) + 1;
+            j++;
+        } else {
+            Utf8Step s = utf8_step(&row->chars[j], row->size - j);
+            rx += s.cols;
+            j += s.bytes;
         }
     }
     return rx;
 }
 
-int editor_row_rx_to_cx(EditorConfig *ec, EditorRow *row, int rx){
+/* 将终端屏幕的视觉列索引 (rx) 逆向转换为 chars 空间的字节索引 (cx) */
+int editor_row_rx_to_cx(EditorConfig *ec, EditorRow *row, int rx)
+{
     int cur_rx = 0;
-    int cx;
-
-    // 从行首向后遍历内存字节
-    for (cx = 0; cx < row->size; cx++){
-        unsigned char c = (unsigned char)row->chars[cx];
-
-        if (c == '\t'){
-            cur_rx += (ec->tab_stop - 1) - (cur_rx % ec->tab_stop) + 1;
-        }else if ((c & 0xC0) != 0x80)
-        {
-            cur_rx += utf8_char_display_width(c);
+    int cx = 0;
+    while (cx < row->size) {
+        if (row->chars[cx] == '\t') {
+            int tab_width = (ec->tab_stop - 1) - (cur_rx % ec->tab_stop) + 1;
+            if (cur_rx + tab_width > rx) return cx;
+            cur_rx += tab_width;
+            cx++;
+        } else {
+            Utf8Step s = utf8_step(&row->chars[cx], row->size - cx);
+            if (cur_rx + s.cols > rx) return cx;
+            cur_rx += s.cols;
+            cx += s.bytes;
         }
-
-        if (cur_rx > rx) return cx;
     }
     return cx;
 }
@@ -109,48 +111,48 @@ int editor_row_rx_to_cx(EditorConfig *ec, EditorRow *row, int rx){
 // ============================================================
 
 void editor_update_row(EditorConfig *ec, EditorRow *row) {
-    // 1. 预计算准确的 render 缓冲区大小，并精确追踪视觉宽度 rx
-    int render_size = 0;
+    // Pass 1: count cells
+    int cell_count = 0;
+    int j = 0;
     int rx = 0;
-    for (int j = 0; j < row->size; j++) {
+    while (j < row->size) {
         if (row->chars[j] == '\t') {
-            int padding = (ec->tab_stop - 1) - (rx % ec->tab_stop) + 1;
-            render_size += padding;
-            rx += padding;
+            int spaces = (ec->tab_stop - 1) - (rx % ec->tab_stop) + 1;
+            cell_count += spaces;
+            rx += spaces;
+            j++;
         } else {
-            render_size++; // render 数组依然是按字节存储
-            if (((unsigned char)row->chars[j] & 0xC0) != 0x80) {
-                rx += utf8_char_display_width((unsigned char)row->chars[j]);
-            }
+            Utf8Step s = utf8_step(&row->chars[j], row->size - j);
+            cell_count++;
+            rx += s.cols;
+            j += s.bytes;
         }
     }
 
-    // 2. 分配 render 缓冲区
-    free(row->render);
-    row->render = editor_safe_realloc(NULL, render_size + 1);
+    // Allocate
+    free(row->cells);
+    row->cells = editor_safe_realloc(NULL, cell_count * sizeof(RenderCell));
+    row->cell_count = cell_count;
 
-    // 3. 填充 render 缓冲区（使用视觉 rx 对齐 Tab）
-    int idx = 0;
+    // Pass 2: fill cells
+    int ci = 0;
+    j = 0;
     rx = 0;
-    for (int j = 0; j < row->size; j++) {
+    while (j < row->size) {
         if (row->chars[j] == '\t') {
-            int padding = (ec->tab_stop - 1) - (rx % ec->tab_stop) + 1;
-            for (int k = 0; k < padding; k++) row->render[idx++] = ' ';
-            rx += padding;
+            int spaces = (ec->tab_stop - 1) - (rx % ec->tab_stop) + 1;
+            for (int k = 0; k < spaces; k++)
+                row->cells[ci++] = (RenderCell){' ', 0, 1, HL_NORMAL};
+            rx += spaces;
+            j++;
         } else {
-            row->render[idx++] = row->chars[j];
-            if (((unsigned char)row->chars[j] & 0xC0) != 0x80) {
-                rx += utf8_char_display_width((unsigned char)row->chars[j]);
-            }
+            Utf8Char uc = utf8_decode(&row->chars[j], row->size - j);
+            row->cells[ci++] = (RenderCell){uc.codepoint, (uint8_t)uc.byte_len,
+                                            (uint8_t)uc.display_width, HL_NORMAL};
+            rx += uc.display_width;
+            j += uc.byte_len;
         }
     }
-    row->render[idx] = '\0';
-    row->render_size = idx;
-
-    // 🚀 核心防御：在交给语法高亮器之前，强制分配并清零 high_light 数组！
-    // 这彻底杜绝了内存垃圾导致的 ANSI 序列切碎 UTF-8 字符的问题。
-    row->high_light = editor_safe_realloc(row->high_light, row->render_size);
-    memset(row->high_light, HL_NORMAL, row->render_size);
 
     editor_update_syntax(ec, row);
 }
@@ -175,9 +177,8 @@ void editor_insert_raw(EditorConfig *ec, int at, const char *s, size_t len)
     memcpy(ec->row[at].chars, s, len);
     ec->row[at].chars[len] = '\0';
 
-    ec->row[at].render_size = 0;
-    ec->row[at].render = NULL;
-    ec->row[at].high_light = NULL;
+    ec->row[at].cell_count = 0;
+    ec->row[at].cells = NULL;
     ec->row[at].highlight_open_comment = 0;
 
     editor_update_row(ec, &ec->row[at]);
@@ -216,10 +217,7 @@ void editor_insert_char(EditorConfig *ec, int c) {
     //如果开启了覆盖模式，且光标没有越界，直接原地覆写
     if (ec->overwrite_mode && ec->cursor_x < row->size){
         if ((c & 0xC0) != 0x80){
-            unsigned char old_c = (unsigned char)row->chars[ec->cursor_x];
-            int old_len = utf8_char_length(old_c);
-            if (ec->cursor_x + old_len > row->size)
-                old_len = row->size - ec->cursor_x;
+            int old_len = utf8_step(&row->chars[ec->cursor_x], row->size - ec->cursor_x).bytes;
 
             memmove(&row->chars[ec->cursor_x], &row->chars[ec->cursor_x + old_len], row->size - ec->cursor_x - old_len + 1);
             row->size -= old_len;
@@ -240,7 +238,7 @@ void editor_delChar(EditorConfig *ec) {
     EditorRow *row = &ec->row[ec->cursor_y];
 
     if (ec->cursor_x > 0) {
-        editor_row_del_char(ec, row, ec->cursor_x - 1);
+        ec->cursor_x = editor_row_del_char(ec, row, ec->cursor_x - 1);
     } else if (ec->cursor_y > 0) {
         /* 行首退格：当前行合并到上一行末尾 */
         EditorRow *prev_row = &ec->row[ec->cursor_y - 1];
@@ -256,8 +254,7 @@ void editor_delChar(EditorConfig *ec) {
 
         /* 释放当前行，下移后续行填补空缺 */
         free(row->chars);
-        free(row->render);
-        free(row->high_light);
+        free(row->cells);
 
         int remaining = ec->num_rows - ec->cursor_y - 1;  // 当前行后的行数
         if (remaining > 0)
@@ -273,31 +270,27 @@ void editor_delChar(EditorConfig *ec) {
     }
 }
 
-void editor_row_del_char(EditorConfig *ec,EditorRow *row, int at){
-    if (at < 0 || at >= row->size) return;
-    int start_at = at;
+int editor_row_del_char(EditorConfig *ec, EditorRow *row, int at){
+    if (at < 0 || at >= row->size) return ec->cursor_x;
 
-    /* Walk backward from the last byte of the character to its leading byte.
-     * at == cursor_x - 1, which is exactly the last byte of the target char.
-     * Check chars[start_at] itself (not start_at - 1) because the byte at
-     * position at may already be a continuation byte. */
-    while (start_at > 0 && ((unsigned char)row->chars[start_at] & 0xC0) == 0x80) {
-        start_at--;
+    int j = 0;
+    int start_at = 0;
+    int len = 0;
+    while (j <= at && j < row->size) {
+        start_at = j;
+        Utf8Step s = utf8_step(&row->chars[j], row->size - j);
+        len = s.bytes;
+        j += len;
     }
 
-    int del_len = at - start_at + 1;
+    memmove(&row->chars[start_at], &row->chars[start_at + len],
+            row->size - (start_at + len) + 1);
+    row->size -= len;
 
-    //内存覆写，后面字符串往前拉覆盖整个多字节字符
-    memmove(&row->chars[start_at],&row->chars[at + 1],row->size - at);
-
-    //更新长度并且手搓内存
-    row->size -= del_len;
-    row->chars[row->size] = '\0';
-
-    editor_update_row(ec,row);
+    editor_update_row(ec, row);
     ec->dirty++;
 
-    ec->cursor_x = start_at;
+    return start_at;
 }
 
 // ============================================================
@@ -311,9 +304,7 @@ void editor_deleteCharAtCursor(EditorConfig *ec) {
     EditorRow *row = &ec->row[ec->cursor_y];
 
     if (ec->cursor_x < row->size) {
-        int char_len = utf8_char_length((unsigned char)row->chars[ec->cursor_x]);
-        if (ec->cursor_x + char_len > row->size)
-            char_len = row->size - ec->cursor_x;
+        int char_len = utf8_step(&row->chars[ec->cursor_x], row->size - ec->cursor_x).bytes;
         memmove(&row->chars[ec->cursor_x],
                 &row->chars[ec->cursor_x + char_len],
                 row->size - ec->cursor_x - char_len + 1);
@@ -332,8 +323,7 @@ void editor_deleteCharAtCursor(EditorConfig *ec) {
         editor_update_row(ec, row);
 
         free(next_row->chars);
-        free(next_row->render);
-        free(next_row->high_light);
+        free(next_row->cells);
 
         int remaining = ec->num_rows - ec->cursor_y - 2;  // next_row 后的行数
         if (remaining > 0)
@@ -407,7 +397,8 @@ char *editor_prompt(EditorConfig *ec, const char *prompt)
         if (c == KEY_BACKSPACE) {
             if (buf_len != 0) {
                 int del_len = 1;
-                while (buf_len - del_len > 0 && ((unsigned char)buf[buf_len - del_len] & 0xC0) == 0x80)
+                while (del_len < 4 && buf_len - del_len > 0
+                       && ((unsigned char)buf[buf_len - del_len] & 0xC0) == 0x80)
                     del_len++;
                 buf_len -= del_len;
                 buf[buf_len] = '\0';
@@ -541,4 +532,23 @@ void editor_find_next(EditorConfig *ec) {
     }
 
     editor_set_status_message(ec, "No more matches");
+}
+
+// ============================================================
+//  行号跳转（Ctrl+J）
+// ============================================================
+
+void editor_goto_line(EditorConfig *ec) {
+    char *query = editor_prompt(ec, "Go to line: %s (ESC to cancel)");
+    if (query == NULL) return;
+
+    int line = atoi(query);
+    free(query);
+
+    if (line < 1) line = 1;
+    if (line > ec->num_rows) line = ec->num_rows;
+
+    ec->cursor_y = line - 1;
+    ec->cursor_x = 0;
+    ec->row_off = ec->cursor_y;
 }
