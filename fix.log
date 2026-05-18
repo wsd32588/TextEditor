@@ -4,7 +4,7 @@ Fix Log - TextEditor Project
 Date      : 2026-05-14 — 2026-05-19
 Author    : Claude Code (AI assistant)
 =========================================================
-Revisions : 18
+Revisions : 19
 
 =========================================================
 Revision 1 — 2026-05-14
@@ -959,3 +959,38 @@ Affected Files
   src/syntax.c          —  94 行变更（cell 级语法高亮）
   src/input.c           —  21 行变更（cursor move + goto_line）
   src/Main/main.c       —  15 行删除（冗余 VT 初始化）
+
+=========================================================
+Revision 19 — 2026-05-19
+=========================================================
+
+Summary
+---------------------------------------------------------
+修复中文乱码（控制台 GBK→UTF-8 代码页切换），
+editor_free_all_row 补充 search_query 释放。
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] terminal.c + common.h — 启用 UTF-8 控制台代码页
+    Added   : EditorConfig.uOriginalOutputCP / uOriginalInputCP
+              enable_raw_mode: SetConsoleOutputCP(CP_UTF8)
+                             + SetConsoleCP(CP_UTF8)
+              disable_raw_mode: 恢复原始代码页
+    Why     : 旧代码通过 render[] 逐字节拷贝 chars[] 中的 UTF-8
+              字节，但控制台处于 GBK(CP936) 模式时，UTF-8 多字节
+              序列被当作 GBK 解析——"中"(E4 B8 AD,3 字节) 被拆为
+              2 个 GBK 字符显示为"脰脨"。设为 CP_UTF8 后终端
+              正确按 UTF-8 解码，中文恢复正常。
+
+[2] editor.c — editor_free_all_row 释放 search_query
+    Added   : if (ec->search_query) { free; NULL; }
+    Why     : Ctrl+P 快速打开新文件时 search_query 未释放，
+              造成内存泄漏。虽然单次泄漏很小（~100 字节），
+              但频繁切换文件会累积。
+
+Affected Files
+---------------------------------------------------------
+  include/common.h      —  2 行新增
+  src/editor.c          —  4 行新增
+  src/terminal.c        —  9 行新增

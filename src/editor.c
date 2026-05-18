@@ -62,6 +62,10 @@ void editor_free_all_row(EditorConfig *ec){
         free(ec->filename);
         ec->filename = NULL;
     }
+    if (ec->search_query) {
+        free(ec->search_query);
+        ec->search_query = NULL;
+    }
 }
 
 // ============================================================

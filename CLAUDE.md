@@ -12,12 +12,13 @@ Windows 终端文本编辑器，C99 编写，CMake + Ninja 构建，零第三方
 
 ```
 main → editor_init / editor_refresh_screen / editor_process_key
-        ├── terminal  — 原始模式、按键读取、窗口大小
-        ├── render    — AppendBuffer 屏幕绘制、语法高亮着色
-        ├── input     — 函数指针按键分发表
-        ├── editor    — 核心编辑操作（插入/删除/换行/合并行）
+        ├── terminal  — 原始模式、UTF-8 代码页、按键读取、窗口大小
+        ├── common    — UTF-8 编解码（utf8_decode/encode/step）、安全内存分配
+        ├── render    — AppendBuffer 屏幕绘制、RenderCell 颜色输出
+        ├── input     — 函数指针按键分发表、光标移动
+        ├── editor    — 核心编辑操作（插入/删除/换行/合并行）、坐标转换
         ├── fileio    — 文件打开/保存
-        └── syntax    — C 语法高亮引擎（关键字/注释/数字）
+        └── syntax    — 5 语言语法高亮（cell 级关键字/注释/搜索匹配）
 ```
 
 所有函数接收 `EditorConfig *ec` 作为第一个参数，无全局变量。
@@ -34,11 +35,33 @@ main → editor_init / editor_refresh_screen / editor_process_key
 - C 语法高亮（关键字/注释/数字着色）
 - 视口滚动（垂直 + 水平偏移）
 - 状态栏（文件名/行数/修改标记）+ 消息栏（5 秒超时）
-- 安全内存分配（`editor_safe_realloc`/`editor_safe_strdup`）
+- 安全内存分配（`editor_safe_realloc`/`editor_strdup`）
+- 覆盖模式 — INS 切换，UTF-8 安全逐字节覆写
+- 快速打开 — Ctrl+P 搜索文件名直接打开
+- 查找/查找下一个 — Ctrl+F/Ctrl+G，环形搜索 + 匹配高亮
+- 行号跳转 — Ctrl+J 输入行号直接跳转
+- 5 语言语法高亮 — C/C++/Python/Rust/Go/JS，多行注释状态机（迭代传播）
+- UTF-8 全链路 — Utf8Char/Utf8Step/RenderCell 三层抽象，应用层零裸位运算
+- 控制台 UTF-8 代码页自动切换（SetConsoleOutputCP）
 
 ## 关键数据流
 
-编辑器定义一个 EditorConfig (config)，它将 EditorRow 的动态数组（row/rows/num_rows）保存在 Editor 结构体上。render 层将 Editor 中的文本转换为 AppendBuffer，加上 ANSI 转义码（用于光标定位和语法高亮），然后一次写入 stdout。
+```
+输入字节 → chars[] → editor_update_row()
+                       ├── Pass 1: utf8_step 数 cell
+                       ├── Pass 2: utf8_decode → RenderCell {codepoint, byte_len, display_width, hl}
+                       └── editor_update_syntax() → cells[].hl（cell 级着色）
+
+显示帧:   cells[] → editor_draw_rows()
+                     ├── cell_start 按 display_width 跳过 col_off
+                     ├── cell_n    按 display_width 截断到 available_cols
+                     └── utf8_encode(cell.codepoint) → UTF-8 字节 → AppendBuffer → WriteFile
+```
+
+坐标系统：
+- `cursor_x/y` — chars-space（字节索引，\t 算 1 字节）
+- `rx` — render-space（视觉列，\t 展开，中文占 2 列）
+- 转换：`editor_row_cx_to_rx` / `editor_row_rx_to_cx`（均走 `utf8_step`）
 
 ## 文件清单
 
@@ -56,16 +79,16 @@ main → editor_init / editor_refresh_screen / editor_process_key
 ### 源文件
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `src/Main/main.c` | ~47 | 入口，VT 初始化，主循环 |
-| `src/terminal.c` | ~122 | 原始模式，按键读取，转义序列解析 |
-| `src/render.c` | ~189 | AppendBuffer，滚动，屏幕绘制 |
-| `src/editor.c` | ~233 | 核心编辑（插入/删除/分割行） |
-| `src/input.c` | ~94 | 函数指针分发表 |
-| `src/fileio.c` | ~73 | 文件打开/保存 |
-| `src/syntax.c` | ~121 | C 语法高亮引擎 |
-| `src/common.c` | ~33 | safe_realloc/safe_strdup 辅助函数 |
+| `src/Main/main.c` | ~32 | 入口，主循环 |
+| `src/terminal.c` | ~170 | 原始模式、UTF-8 代码页、按键读取、转义序列解析 |
+| `src/render.c` | ~280 | AppendBuffer，RenderCell 输出，滚动，屏幕绘制 |
+| `src/editor.c` | ~570 | 核心编辑 + RenderCell 构建 + 坐标转换 + 搜索 |
+| `src/input.c` | ~175 | 函数指针分发表 + 光标移动 + 快速打开 + 行跳转 |
+| `src/fileio.c` | ~91 | 文件打开/保存 |
+| `src/syntax.c` | ~300 | 5 语言 cell 级语法高亮引擎 |
+| `src/common.c` | ~105 | UTF-8 编解码（utf8_decode/encode/step）+ 安全内存分配 |
 
-约 1100 行 C 代码。
+约 1900 行 C 代码。
 
 ## 编译
 
@@ -82,8 +105,8 @@ CMakeLists.txt 要求 C99 + `-Wall -Wextra -Wpedantic`。链接 `kernel32`。
 
 - 字符串字面量语法高亮未实现
 - 数字字面量语法高亮未实现
-- 行跳转功能未实现
 - 鼠标支持未实现
+- 撤销/重做未实现
 
 ## Git 仓库
 
@@ -91,14 +114,16 @@ CMakeLists.txt 要求 C99 + `-Wall -Wextra -Wpedantic`。链接 `kernel32`。
 - `.gitignore` 排除：`build/`、`.claude/`、`.idea/`、`*.exe`、个人笔记
 - VERSION_0.1 快照已打 zip 备份：`../TextEditor_VERSION_0.1.zip`
 
-## 近期实现（2026-05-17 为止）
+## 近期实现（2026-05-19 为止）
 
-- **覆盖模式** — INS 切换 `ec->overwrite_mode`，按位覆写而非插入
-- **快速打开** — Ctrl+P 搜索文件名直接打开（放弃未保存修改时警告）
-- **多行注释高亮** — `/* */` 状态机跨行追踪 + 递归重刷
-- **Ctrl+G 查找下一个** — 同行续搜 → 跨行环形搜，绕回时提示
-- **`editor_safe_realloc`** 处理 size==0，消除 MinGW crash
-- **UTF-8 全链路支持** — 坐标转换/光标移动/删除/覆盖模式/输入/提示框均按完整字符处理，支持中文和 Emoji
+- **RenderCell 架构** — EditorRow 从字节缓冲 (render[]/high_light[]) 迁移至 RenderCell 数组 (cells[])，display loop 按 cell 迭代 + utf8_encode 输出
+- **UTF-8 工具层** — Utf8Char/Utf8Step/utf8_decode/utf8_encode/utf8_step 统一入口，应用层 `(c & 0xC0)` 裸位运算从 15 处减至 2 处
+- **语法高亮 cell 级重写** — cell_is_sep/cell_match_seq 替代 is_separator/strncmp，支持非 ASCII 标识符
+- **多行注释迭代传播** — 递归 → while 循环，消除大文件栈溢出风险
+- **控制台 UTF-8 代码页** — enable_raw_mode 自动 SetConsoleOutputCP(CP_UTF8)，修复中文在 GBK 终端乱码
+- **行号跳转** — Ctrl+J 输入行号直接跳转
+- **Ctrl+F 优先搜索当前行** — 先从光标处向后找，再跨行环形搜索
+- **覆盖模式续字节保护** — 仅 leading byte 触发旧字符删除，保障 UTF-8 序列完整
 
 ## 变更日志要求
 

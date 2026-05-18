@@ -149,6 +149,8 @@ typedef struct {
     HANDLE hOUT;                 // 标准输出句柄
     DWORD dwOriginalInMode;      // 原始控制台输入模式备份
     DWORD dwOriginalOutMode;     // 原始控制台输出模式备份
+    UINT  uOriginalOutputCP;     // 原始输出代码页
+    UINT  uOriginalInputCP;      // 原始输入代码页
 } EditorConfig;
 
 // ============================================================

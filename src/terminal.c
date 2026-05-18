@@ -26,6 +26,8 @@ void disable_raw_mode(EditorConfig *ec) {
     if (ec->raw_mode) {
         SetConsoleMode(ec->hIN, ec->dwOriginalInMode);
         SetConsoleMode(ec->hOUT, ec->dwOriginalOutMode);
+        SetConsoleOutputCP(ec->uOriginalOutputCP);
+        SetConsoleCP(ec->uOriginalInputCP);
         ec->raw_mode = 0;
     }
 }
@@ -33,6 +35,13 @@ void disable_raw_mode(EditorConfig *ec) {
 void enable_raw_mode(EditorConfig *ec) {
     ec->hIN = GetStdHandle(STD_INPUT_HANDLE);
     ec->hOUT = GetStdHandle(STD_OUTPUT_HANDLE);
+
+    /* Switch console I/O to UTF-8 so multi-byte characters survive the
+     * code-page round-trip. Save originals to restore on quit. */
+    ec->uOriginalOutputCP = GetConsoleOutputCP();
+    ec->uOriginalInputCP  = GetConsoleCP();
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
 
     if (!GetConsoleMode(ec->hIN, &ec->dwOriginalInMode)) return;
     if (!GetConsoleMode(ec->hOUT, &ec->dwOriginalOutMode)) return;
