@@ -1,8 +1,8 @@
 === TextEditor Codebase Dump ===
-Generated: Tue May 19 22:43:55     2026
+Generated: Tue May 19 23:39:46     2026
 
 === HEAD ===
-3b0d33222f09c10520df9f2782b8c64c3432cd1e Refactor: shrink god struct signatures; dynamic undo; incremental syntax
+e9b0ef8a28201c5f3e1c9766cd48e6e0f706ed0c Add diagnostic status messages to editor_undo/editor_redo
 
 ============================================================
 FILE: include/common.h
@@ -423,7 +423,7 @@ void enable_raw_mode(TerminalState *ts) {
     if (!GetConsoleMode(ts->hOUT, &ts->dwOriginalOutMode)) return;
 
     DWORD raw_in = ts->dwOriginalInMode;
-    raw_in &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT);
+    raw_in &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
     raw_in |= ENABLE_WINDOW_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT;
     SetConsoleMode(ts->hIN, raw_in);
 
@@ -729,7 +729,7 @@ static void editor_draw_status_bar(AppendBuffer *ab, EditorConfig *ec)
 //  消息栏
 // ============================================================
 
-void editor_draw_message_bar(AppendBuffer *ab, EditorConfig *ec)
+static void editor_draw_message_bar(AppendBuffer *ab, EditorConfig *ec)
 {
     abuf_append(ab, "\x1b[K", 3);                // 清空本行
     int msglen = strlen(ec->ui.statusmsg);
@@ -950,6 +950,12 @@ void editor_update_row(EditorConfig *ec, EditorRow *row) {
 
     // Allocate
     free(row->cells);
+    if (cell_count == 0) {
+        row->cells = NULL;
+        row->cell_count = 0;
+        editor_update_syntax(&ec->doc, &ec->settings, &ec->ui, row);
+        return;
+    }
     row->cells = editor_safe_realloc(NULL, cell_count * sizeof(RenderCell));
     row->cell_count = cell_count;
 
@@ -1092,19 +1098,27 @@ static void execute_op(EditorConfig *ec, UndoRecord *rec, int is_undo) {
 }
 
 void editor_undo (EditorConfig *ec) {
-    if (ec->doc.undo_count == 0) return;
+    if (ec->doc.undo_count == 0) {
+        editor_set_status_message(ec, "Nothing to undo (undo stack empty)");
+        return;
+    }
     UndoRecord rec = ec->doc.undo_stack[--ec->doc.undo_count];
     execute_op(ec,&rec,1);
     ensure_stack_cap(&ec->doc.redo_stack, &ec->doc.redo_cap, ec->doc.redo_count + 1);
     ec->doc.redo_stack[ec->doc.redo_count++] = rec;
+    editor_set_status_message(ec, "Undo! (%d ops remaining)", ec->doc.undo_count);
 }
 
 void editor_redo (EditorConfig *ec) {
-    if (ec->doc.redo_count == 0) return;
+    if (ec->doc.redo_count == 0) {
+        editor_set_status_message(ec, "Nothing to redo (redo stack empty)");
+        return;
+    }
     UndoRecord rec = ec->doc.redo_stack[--ec->doc.redo_count];
     execute_op(ec,&rec,0);
     ensure_stack_cap(&ec->doc.undo_stack, &ec->doc.undo_cap, ec->doc.undo_count + 1);
     ec->doc.undo_stack[ec->doc.undo_count++] = rec;
+    editor_set_status_message(ec, "Redo! (%d ops remaining)", ec->doc.redo_count);
 }
 
 // ============================================================
@@ -2063,22 +2077,25 @@ void editor_update_syntax(Document *doc, EditorSettings *settings, UIState *ui, 
             }
         } // end if (settings->syntax != NULL)
 
-        /* 搜索匹配高亮 */
+        /* 搜索匹配高亮 — 在 chars[] 层做 strstr 然后映射到 cell 索引 */
         if (ui->search_query != NULL) {
             int query_len = strlen(ui->search_query);
-            if (query_len > 0 && query_len <= row->cell_count) {
-                for (int i = 0; i <= row->cell_count - query_len; i++) {
-                    int match = 1;
-                    for (int k = 0; k < query_len; k++) {
-                        if (row->cells[i + k].codepoint != (unsigned char)ui->search_query[k]) {
-                            match = 0; break;
-                        }
+            if (query_len > 0 && row->size > 0) {
+                const char *search_start = row->chars;
+                const char *p;
+                while ((p = strstr(search_start, ui->search_query)) != NULL) {
+                    int byte_off = (int)(p - row->chars);
+                    int byte_end = byte_off + query_len;
+                    int bi = 0;
+                    for (int ci = 0; ci < row->cell_count; ci++) {
+                        int cell_bytes = row->cells[ci].byte_len;
+                        if (cell_bytes == 0) cell_bytes = 1; /* Tab→空格 cell，占 chars 1 字节 */
+                        if (bi >= byte_off && bi < byte_end)
+                            row->cells[ci].hl = HL_MATCH;
+                        if (bi >= byte_end) break;
+                        bi += cell_bytes;
                     }
-                    if (match) {
-                        for (int k = 0; k < query_len; k++)
-                            row->cells[i + k].hl = HL_MATCH;
-                        i += query_len - 1;
-                    }
+                    search_start = p + query_len;
                 }
             }
         }
