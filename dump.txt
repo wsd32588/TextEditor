@@ -1,8 +1,8 @@
 === TextEditor Codebase Dump ===
-Generated: Tue May 19 23:39:46     2026
+Generated: Wed May 20 00:08:21     2026
 
 === HEAD ===
-e9b0ef8a28201c5f3e1c9766cd48e6e0f706ed0c Add diagnostic status messages to editor_undo/editor_redo
+0c1be4f9730c4d9a76bdf6019186687c80a253e8 Extract undo/redo engine to separate module src/undo.c + include/undo.h
 
 ============================================================
 FILE: include/common.h
@@ -244,9 +244,6 @@ void editor_update_row(EditorConfig *ec, EditorRow *row);
 void editor_free_all_row(EditorConfig *ec);
 int  editor_row_del_char(EditorConfig *ec, EditorRow *row, int at);
 
-void editor_push_undo(EditorConfig *ec, OpType type, int y, int x, const char *text, int len);
-void editor_undo(EditorConfig *ec);
-void editor_redo(EditorConfig *ec);
 void editor_emergency_save(EditorConfig *ec);
 
 #endif // TEXTEDITOR_EDITOR_H
@@ -326,6 +323,20 @@ int terminal_read_key(TerminalState *ts);
 int terminal_get_window_size(TerminalState *ts, ViewState *view);
 
 #endif // TEXTEDITOR_TERMINAL_H
+
+============================================================
+FILE: include/undo.h
+============================================================
+#ifndef TEXTEDITOR_UNDO_H
+#define TEXTEDITOR_UNDO_H
+
+#include "common.h"
+
+void editor_push_undo(EditorConfig *ec, OpType type, int y, int x, const char *text, int len);
+void editor_undo(EditorConfig *ec);
+void editor_redo(EditorConfig *ec);
+
+#endif // TEXTEDITOR_UNDO_H
 
 ============================================================
 FILE: src/Main/main.c
@@ -797,6 +808,7 @@ FILE: src/editor.c
  *   chars → render = 1:1 (with \t expanded to spaces).
  */
 #include "editor.h"
+#include "undo.h"
 #include "common.h"
 #include "terminal.h"
 #include "render.h"
@@ -980,145 +992,6 @@ void editor_update_row(EditorConfig *ec, EditorRow *row) {
     }
 
     editor_update_syntax(&ec->doc, &ec->settings, &ec->ui, row);
-}
-
-// ============================================================
-// 撤销/重做(undo/redo)(Ctrl + Z,Ctrl + Y)
-// ============================================================
-
-static void ensure_stack_cap(UndoRecord **stack, int *cap, int needed) {
-    if (*cap >= needed) return;
-    int new_cap = *cap == 0 ? UNDO_INIT_CAP : *cap;
-    while (new_cap < needed) new_cap *= 2;
-    *stack = editor_safe_realloc(*stack, new_cap * sizeof(UndoRecord));
-    *cap = new_cap;
-}
-
-//将操作压入Undo栈，并且自动清空Redo栈
-void editor_push_undo(EditorConfig *ec,OpType type,int y,int x,const char *text,int len) {
-    if (ec->doc.is_action_locked) return; //撤销/重做中,不记录新操作
-    //新操作打断重做链，清空Redo栈
-    for (int i = 0; i < ec->doc.redo_count; i++) {
-        free (ec->doc.redo_stack[i].text);
-    }
-    ec->doc.redo_count = 0;
-    time_t now = time(NULL);
-
-    //(防抖合并)，连续输入字符
-    if (type == OP_INSERT_CHARS && ec->doc.undo_count > 0) {
-        UndoRecord *last = &ec->doc.undo_stack[ec->doc.undo_count-1];
-        if (last->type ==OP_INSERT_CHARS
-            && last->cursor_y == y
-            && last->cursor_x  + last->text_len== x
-            && (now - last->timestamp < 2)) {
-            last->text = editor_safe_realloc(last->text, last->text_len + len + 1);
-            memcpy(last->text + last->text_len, text, len);
-            last->text[last->text_len] = '\0';
-            last->timestamp = now;
-            return;
-            }
-    }
-
-    //(防抖合并),连续删除字符
-    if (type == OP_DELETE_CHARS && ec->doc.undo_count > 0) {
-        UndoRecord *last = &ec->doc.undo_stack[ec->doc.undo_count-1];
-        if (last->type == OP_DELETE_CHARS
-            && last->cursor_y == y
-            && last->cursor_x == x + len
-            && (now - last->timestamp) < 2) {
-            char *old_text = last->text;
-            int old_len = last->text_len;
-            char *new_text = editor_safe_realloc(NULL, old_len + len + 1);
-            memcpy(new_text, text, len);
-            memcpy(new_text + len, old_text, old_len);
-            new_text[old_len + len] = '\0';
-            free(old_text);
-            last->text = new_text;
-            last->cursor_x = x;
-            last->text_len += len;
-            last->timestamp = now;
-            return;
-            }
-    }
-
-    ensure_stack_cap(&ec->doc.undo_stack, &ec->doc.undo_cap, ec->doc.undo_count + 1);
-
-    UndoRecord *rec = &ec->doc.undo_stack[ec->doc.undo_count++];
-    rec->type = type;
-    rec->cursor_x = x;
-    rec->cursor_y = y;
-    rec->text = editor_safe_realloc(NULL, len + 1);
-    if (len > 0) memcpy(rec->text,text,len);
-    rec->text[len] = '\0';
-    rec->text_len = len;
-    rec->timestamp = now;
-}
-
-static void execute_op(EditorConfig *ec, UndoRecord *rec, int is_undo) {
-    ec->doc.is_action_locked = 1; // 上锁
-
-    OpType effective_type = rec->type;
-    if (is_undo) {
-        if (effective_type == OP_INSERT_CHARS) effective_type = OP_DELETE_CHARS;
-        else if (effective_type == OP_DELETE_CHARS) effective_type = OP_INSERT_CHARS;
-        else if (effective_type == OP_INSERT_LINE) effective_type = OP_DELETE_LINE;
-        else if (effective_type == OP_DELETE_LINE) effective_type = OP_INSERT_LINE;
-    }
-
-    switch (effective_type) {
-    case OP_INSERT_CHARS:
-        ec->view.cursor_y = rec->cursor_y;
-        ec->view.cursor_x = rec->cursor_x;
-        for (int i = 0; i < rec->text_len; i++) {
-            editor_row_insert_char(ec, &ec->doc.row[ec->view.cursor_y], ec->view.cursor_x++, rec->text[i]);
-        }
-        break;
-    case OP_DELETE_CHARS:
-        ec->view.cursor_y = rec->cursor_y;
-        for (int i = 0; i < rec->text_len; i++) {
-            editor_row_del_char(ec, &ec->doc.row[ec->view.cursor_y], rec->cursor_x);
-        }
-        ec->view.cursor_x = rec->cursor_x;
-        break;
-    case OP_INSERT_LINE:
-        ec->view.cursor_y = rec->cursor_y;
-        ec->view.cursor_x = rec->cursor_x;
-        editor_insert_newline(ec);
-        break;
-    case OP_DELETE_LINE:
-        ec->view.cursor_y = rec->cursor_y + 1;
-        ec->view.cursor_x = 0;
-        editor_delChar(ec);
-        ec->view.cursor_y = rec->cursor_y;
-        ec->view.cursor_x = rec->cursor_x;
-        break;
-    }
-
-    ec->doc.is_action_locked = 0; // 解锁
-}
-
-void editor_undo (EditorConfig *ec) {
-    if (ec->doc.undo_count == 0) {
-        editor_set_status_message(ec, "Nothing to undo (undo stack empty)");
-        return;
-    }
-    UndoRecord rec = ec->doc.undo_stack[--ec->doc.undo_count];
-    execute_op(ec,&rec,1);
-    ensure_stack_cap(&ec->doc.redo_stack, &ec->doc.redo_cap, ec->doc.redo_count + 1);
-    ec->doc.redo_stack[ec->doc.redo_count++] = rec;
-    editor_set_status_message(ec, "Undo! (%d ops remaining)", ec->doc.undo_count);
-}
-
-void editor_redo (EditorConfig *ec) {
-    if (ec->doc.redo_count == 0) {
-        editor_set_status_message(ec, "Nothing to redo (redo stack empty)");
-        return;
-    }
-    UndoRecord rec = ec->doc.redo_stack[--ec->doc.redo_count];
-    execute_op(ec,&rec,0);
-    ensure_stack_cap(&ec->doc.undo_stack, &ec->doc.undo_cap, ec->doc.undo_count + 1);
-    ec->doc.undo_stack[ec->doc.undo_count++] = rec;
-    editor_set_status_message(ec, "Redo! (%d ops remaining)", ec->doc.redo_count);
 }
 
 // ============================================================
@@ -1544,6 +1417,7 @@ FILE: src/input.c
 #include "common.h"
 #include "input.h"
 #include "editor.h"
+#include "undo.h"
 #include "terminal.h"
 #include "fileio.h"
 #include <stdio.h>
@@ -2254,6 +2128,163 @@ Utf8Step utf8_step(const char *s, int s_len){
 
 
 ============================================================
+FILE: src/undo.c
+============================================================
+/*
+ * Undo/redo engine — stack-based with debounce merging.
+ *
+ * editor_push_undo records every mutation (insert/delete chars/lines).
+ * Consecutive inserts or deletes within 2 s are merged into one record.
+ * execute_op applies or reverses a single record; is_action_locked
+ * prevents re-entrant recording during undo/redo execution.
+ */
+#include "undo.h"
+#include "editor.h"
+#include <string.h>
+#include <stdlib.h>
+#include <time.h>
+
+static void ensure_stack_cap(UndoRecord **stack, int *cap, int needed) {
+    if (*cap >= needed) return;
+    int new_cap = *cap == 0 ? UNDO_INIT_CAP : *cap;
+    while (new_cap < needed) new_cap *= 2;
+    *stack = editor_safe_realloc(*stack, new_cap * sizeof(UndoRecord));
+    *cap = new_cap;
+}
+
+void editor_push_undo(EditorConfig *ec, OpType type, int y, int x,
+                      const char *text, int len) {
+    if (ec->doc.is_action_locked) return;
+
+    for (int i = 0; i < ec->doc.redo_count; i++)
+        free(ec->doc.redo_stack[i].text);
+    ec->doc.redo_count = 0;
+    time_t now = time(NULL);
+
+    /* merge consecutive inserts */
+    if (type == OP_INSERT_CHARS && ec->doc.undo_count > 0) {
+        UndoRecord *last = &ec->doc.undo_stack[ec->doc.undo_count - 1];
+        if (last->type == OP_INSERT_CHARS
+            && last->cursor_y == y
+            && last->cursor_x + last->text_len == x
+            && (now - last->timestamp < 2)) {
+            last->text = editor_safe_realloc(last->text,
+                                             last->text_len + len + 1);
+            memcpy(last->text + last->text_len, text, len);
+            last->text[last->text_len] = '\0';
+            last->timestamp = now;
+            return;
+        }
+    }
+
+    /* merge consecutive deletes (prepend) */
+    if (type == OP_DELETE_CHARS && ec->doc.undo_count > 0) {
+        UndoRecord *last = &ec->doc.undo_stack[ec->doc.undo_count - 1];
+        if (last->type == OP_DELETE_CHARS
+            && last->cursor_y == y
+            && last->cursor_x == x + len
+            && (now - last->timestamp) < 2) {
+            char *old_text = last->text;
+            int old_len = last->text_len;
+            char *new_text = editor_safe_realloc(NULL, old_len + len + 1);
+            memcpy(new_text, text, len);
+            memcpy(new_text + len, old_text, old_len);
+            new_text[old_len + len] = '\0';
+            free(old_text);
+            last->text = new_text;
+            last->cursor_x = x;
+            last->text_len += len;
+            last->timestamp = now;
+            return;
+        }
+    }
+
+    ensure_stack_cap(&ec->doc.undo_stack, &ec->doc.undo_cap,
+                     ec->doc.undo_count + 1);
+
+    UndoRecord *rec = &ec->doc.undo_stack[ec->doc.undo_count++];
+    rec->type = type;
+    rec->cursor_x = x;
+    rec->cursor_y = y;
+    rec->text = editor_safe_realloc(NULL, len + 1);
+    if (len > 0) memcpy(rec->text, text, len);
+    rec->text[len] = '\0';
+    rec->text_len = len;
+    rec->timestamp = now;
+}
+
+static void execute_op(EditorConfig *ec, UndoRecord *rec, int is_undo) {
+    ec->doc.is_action_locked = 1;
+
+    OpType effective_type = rec->type;
+    if (is_undo) {
+        if (effective_type == OP_INSERT_CHARS) effective_type = OP_DELETE_CHARS;
+        else if (effective_type == OP_DELETE_CHARS) effective_type = OP_INSERT_CHARS;
+        else if (effective_type == OP_INSERT_LINE) effective_type = OP_DELETE_LINE;
+        else if (effective_type == OP_DELETE_LINE) effective_type = OP_INSERT_LINE;
+    }
+
+    switch (effective_type) {
+    case OP_INSERT_CHARS:
+        ec->view.cursor_y = rec->cursor_y;
+        ec->view.cursor_x = rec->cursor_x;
+        for (int i = 0; i < rec->text_len; i++)
+            editor_row_insert_char(ec, &ec->doc.row[ec->view.cursor_y],
+                                  ec->view.cursor_x++, rec->text[i]);
+        break;
+    case OP_DELETE_CHARS:
+        ec->view.cursor_y = rec->cursor_y;
+        for (int i = 0; i < rec->text_len; i++)
+            editor_row_del_char(ec, &ec->doc.row[ec->view.cursor_y],
+                               rec->cursor_x);
+        ec->view.cursor_x = rec->cursor_x;
+        break;
+    case OP_INSERT_LINE:
+        ec->view.cursor_y = rec->cursor_y;
+        ec->view.cursor_x = rec->cursor_x;
+        editor_insert_newline(ec);
+        break;
+    case OP_DELETE_LINE:
+        ec->view.cursor_y = rec->cursor_y + 1;
+        ec->view.cursor_x = 0;
+        editor_delChar(ec);
+        ec->view.cursor_y = rec->cursor_y;
+        ec->view.cursor_x = rec->cursor_x;
+        break;
+    }
+
+    ec->doc.is_action_locked = 0;
+}
+
+void editor_undo(EditorConfig *ec) {
+    if (ec->doc.undo_count == 0) {
+        editor_set_status_message(ec, "Nothing to undo (undo stack empty)");
+        return;
+    }
+    UndoRecord rec = ec->doc.undo_stack[--ec->doc.undo_count];
+    execute_op(ec, &rec, 1);
+    ensure_stack_cap(&ec->doc.redo_stack, &ec->doc.redo_cap,
+                     ec->doc.redo_count + 1);
+    ec->doc.redo_stack[ec->doc.redo_count++] = rec;
+    editor_set_status_message(ec, "Undo! (%d ops remaining)",
+                              ec->doc.undo_count);
+}
+
+void editor_redo(EditorConfig *ec) {
+    if (ec->doc.redo_count == 0) {
+        editor_set_status_message(ec, "Nothing to redo (redo stack empty)");
+        return;
+    }
+    UndoRecord rec = ec->doc.redo_stack[--ec->doc.redo_count];
+    execute_op(ec, &rec, 0);
+    ensure_stack_cap(&ec->doc.undo_stack, &ec->doc.undo_cap,
+                     ec->doc.undo_count + 1);
+    ec->doc.undo_stack[ec->doc.undo_count++] = rec;
+    editor_set_status_message(ec, "Redo! (%d ops remaining)",
+                              ec->doc.redo_count);
+}
+
+============================================================
 FILE: CMakeLists.txt
 ============================================================
 cmake_minimum_required(VERSION 3.10)
@@ -2274,6 +2305,7 @@ set(SOURCES
         src/fileio.c
         src/syntax.c
         src/common.c
+        src/undo.c
 )
 
 # 头文件列表（在某些 IDE 如 Visual Studio 中显示用）
@@ -2285,6 +2317,7 @@ set(HEADERS
         include/editor.h
         include/fileio.h
         include/syntax.h
+        include/undo.h
 )
 
 add_executable(TextEditor ${SOURCES} ${HEADERS})
