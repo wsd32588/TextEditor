@@ -12,6 +12,7 @@
 #include "common.h"
 #include "input.h"
 #include "editor.h"
+#include "undo.h"
 #include "terminal.h"
 #include "fileio.h"
 #include <stdio.h>

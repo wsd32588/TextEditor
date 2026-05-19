@@ -16,6 +16,7 @@ set(SOURCES
         src/fileio.c
         src/syntax.c
         src/common.c
+        src/undo.c
 )
 
 # 头文件列表（在某些 IDE 如 Visual Studio 中显示用）
@@ -27,6 +28,7 @@ set(HEADERS
         include/editor.h
         include/fileio.h
         include/syntax.h
+        include/undo.h
 )
 
 add_executable(TextEditor ${SOURCES} ${HEADERS})
