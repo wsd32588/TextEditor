@@ -261,22 +261,25 @@ void editor_update_syntax(Document *doc, EditorSettings *settings, UIState *ui, 
             }
         } // end if (settings->syntax != NULL)
 
-        /* 搜索匹配高亮 */
+        /* 搜索匹配高亮 — 在 chars[] 层做 strstr 然后映射到 cell 索引 */
         if (ui->search_query != NULL) {
             int query_len = strlen(ui->search_query);
-            if (query_len > 0 && query_len <= row->cell_count) {
-                for (int i = 0; i <= row->cell_count - query_len; i++) {
-                    int match = 1;
-                    for (int k = 0; k < query_len; k++) {
-                        if (row->cells[i + k].codepoint != (unsigned char)ui->search_query[k]) {
-                            match = 0; break;
-                        }
+            if (query_len > 0 && row->size > 0) {
+                const char *search_start = row->chars;
+                const char *p;
+                while ((p = strstr(search_start, ui->search_query)) != NULL) {
+                    int byte_off = (int)(p - row->chars);
+                    int byte_end = byte_off + query_len;
+                    int bi = 0;
+                    for (int ci = 0; ci < row->cell_count; ci++) {
+                        int cell_bytes = row->cells[ci].byte_len;
+                        if (cell_bytes == 0) cell_bytes = 1; /* Tab→空格 cell，占 chars 1 字节 */
+                        if (bi >= byte_off && bi < byte_end)
+                            row->cells[ci].hl = HL_MATCH;
+                        if (bi >= byte_end) break;
+                        bi += cell_bytes;
                     }
-                    if (match) {
-                        for (int k = 0; k < query_len; k++)
-                            row->cells[i + k].hl = HL_MATCH;
-                        i += query_len - 1;
-                    }
+                    search_start = p + query_len;
                 }
             }
         }

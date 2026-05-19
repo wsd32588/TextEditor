@@ -4,7 +4,7 @@ Fix Log - TextEditor Project
 Date      : 2026-05-14 — 2026-05-19
 Author    : Claude Code (AI assistant)
 =========================================================
-Revisions : 20
+Revisions : 22
 
 =========================================================
 Revision 1 — 2026-05-14
@@ -1038,3 +1038,92 @@ Affected Files
   src/input.c           —  20+ 处字段访问替换
   src/syntax.c          —  10+ 处字段访问替换
   src/fileio.c          —  15+ 处字段访问替换
+
+=========================================================
+Revision 21 — 2026-05-19
+=========================================================
+
+Summary
+---------------------------------------------------------
+Fix crash on first keystroke: uninitialized rec->text in
+editor_push_undo; use-after-free + double-free in delete
+merge path; uninitialized syntax_hash in editor_insert_raw.
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] src/editor.c — editor_push_undo: rec->text 未初始化导致首键崩溃
+    Before : rec->text = editor_safe_realloc(rec->text, len + 1);
+    After  : rec->text = editor_safe_realloc(NULL, len + 1);
+    Why    : ensure_stack_cap 通过 realloc 扩容 UndoStack, 新槽位的 text 字段
+             是未初始化垃圾值。realloc(garbage, size) 是未定义行为, 在 Windows
+             调试堆上会立即崩溃（0xCD 填充 → 非法指针）。首键打字/退格均触发。
+
+[2] src/editor.c — 连续删除合并路径: use-after-free + double-free
+    Before : char *new_text = editor_safe_realloc(last->text, ...);
+             memcpy(..., last->text, ...);  // last->text 可能已被 realloc 释放
+             free(last->text);              // realloc 已释放 → double-free
+    After  : 先保存 old_text/old_len, malloc 新缓冲区, memcpy, free 旧指针
+    Why    : realloc 移动块时会释放旧指针。后续 memcpy 读取 last->text 是 UAF,
+             free(last->text) 是 double-free → 堆损坏崩溃。
+
+[3] src/editor.c — editor_insert_raw: syntax_hash 未初始化
+    Before : 仅设 highlight_open_comment = 0
+    After  : 同时设 syntax_hash = 0
+    Why    : realloc 不归零, 增量语法用 syntax_hash 判断行是否变更。未初始化
+             的 hash 可能偶然等于 row_hash 计算值, 导致首行语法高亮被跳过。
+
+Affected Files
+---------------------------------------------------------
+  src/editor.c          — 3 处修改 (line 234-239, 253, 343)
+
+=========================================================
+Revision 22 — 2026-05-19
+=========================================================
+
+Summary
+---------------------------------------------------------
+Fix 3 bugs from code review:
+[1] editor_update_row: empty row alloc size 0 → NULL guard
+[2] Search highlight: codepoint vs UTF-8 byte comparison
+    broke non-ASCII search (Chinese etc.)
+[3] editor_draw_message_bar: missing static
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] src/editor.c — editor_update_row: 空行 cell_count==0 时加 early return
+    Before : free(row->cells);
+             row->cells = editor_safe_realloc(NULL, 0);  // size==0 → free+NULL
+             row->cell_count = 0;
+    After  : free(row->cells);
+             if (cell_count == 0) {
+                 row->cells = NULL; row->cell_count = 0;
+                 editor_update_syntax(...);  // 仍然更新注释传播状态
+                 return;
+             }
+    Why    : editor_safe_realloc 在 size==0 时 free+返回 NULL，虽然当前 render 和
+             syntax 层都有 cell_count==0 的防御，但显式 early return 更安全，且
+             避免了无意义的 editor_safe_realloc 调用。
+
+[2] src/syntax.c — 搜索高亮：chars[] 层 strstr 替代 codepoint 逐 cell 比较
+    Before : for (cell by cell)
+                 if (cells[i+k].codepoint != (unsigned char)search_query[k])
+             将已解码的 Unicode 码点(如 0x4F60='你')与 UTF-8 原始字节(0xE4)比较，
+             非 ASCII 搜索永远匹配不上。
+    After  : 在 row->chars[] 上用 strstr 定位，然后把 byte_off→byte_end
+             映射到 cell 索引设 HL_MATCH。Tab 空格 cell(byte_len==0)统一视作
+             消耗 chars 1 字节。
+    Why    : search_query 存储的是 editor_prompt 返回的原始输入字节(UTF-8)，
+             不能直接和 cells[].codepoint 比较。必须回到 chars 层匹配。
+
+[3] src/render.c — editor_draw_message_bar 加 static
+    Before : void editor_draw_message_bar(...)
+    After  : static void editor_draw_message_bar(...)
+    Why    : 函数仅在 render.c 内部使用，render.h 无声明，加 static 限制符号可见性。
+
+Affected Files
+---------------------------------------------------------
+  src/editor.c          —  1 处修改 (line 164-169, 空行 guard)
+  src/syntax.c          —  1 处修改 (line 264-282, 搜索高亮重写)
+  src/render.c          —  1 处修改 (line 196, static)

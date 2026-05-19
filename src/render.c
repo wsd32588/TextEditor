@@ -193,7 +193,7 @@ static void editor_draw_status_bar(AppendBuffer *ab, EditorConfig *ec)
 //  消息栏
 // ============================================================
 
-void editor_draw_message_bar(AppendBuffer *ab, EditorConfig *ec)
+static void editor_draw_message_bar(AppendBuffer *ab, EditorConfig *ec)
 {
     abuf_append(ab, "\x1b[K", 3);                // 清空本行
     int msglen = strlen(ec->ui.statusmsg);

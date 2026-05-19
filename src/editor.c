@@ -161,6 +161,12 @@ void editor_update_row(EditorConfig *ec, EditorRow *row) {
 
     // Allocate
     free(row->cells);
+    if (cell_count == 0) {
+        row->cells = NULL;
+        row->cell_count = 0;
+        editor_update_syntax(&ec->doc, &ec->settings, &ec->ui, row);
+        return;
+    }
     row->cells = editor_safe_realloc(NULL, cell_count * sizeof(RenderCell));
     row->cell_count = cell_count;
 
@@ -231,11 +237,13 @@ void editor_push_undo(EditorConfig *ec,OpType type,int y,int x,const char *text,
             && last->cursor_y == y
             && last->cursor_x == x + len
             && (now - last->timestamp) < 2) {
-            char *new_text = editor_safe_realloc(last->text, last->text_len + len + 1);
-            memcpy(new_text,text,len);
-            memcpy(new_text + len, last->text, last->text_len);
-            new_text[last->text_len + len] = '\0';
-            free(last->text);
+            char *old_text = last->text;
+            int old_len = last->text_len;
+            char *new_text = editor_safe_realloc(NULL, old_len + len + 1);
+            memcpy(new_text, text, len);
+            memcpy(new_text + len, old_text, old_len);
+            new_text[old_len + len] = '\0';
+            free(old_text);
             last->text = new_text;
             last->cursor_x = x;
             last->text_len += len;
@@ -250,7 +258,7 @@ void editor_push_undo(EditorConfig *ec,OpType type,int y,int x,const char *text,
     rec->type = type;
     rec->cursor_x = x;
     rec->cursor_y = y;
-    rec->text = editor_safe_realloc(rec->text, len + 1);
+    rec->text = editor_safe_realloc(NULL, len + 1);
     if (len > 0) memcpy(rec->text,text,len);
     rec->text[len] = '\0';
     rec->text_len = len;
@@ -339,6 +347,7 @@ void editor_insert_raw(EditorConfig *ec, int at, const char *s, size_t len)
     ec->doc.row[at].cell_count = 0;
     ec->doc.row[at].cells = NULL;
     ec->doc.row[at].highlight_open_comment = 0;
+    ec->doc.row[at].syntax_hash = 0;
 
     editor_update_row(ec, &ec->doc.row[at]);
 
