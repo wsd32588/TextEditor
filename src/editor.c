@@ -309,19 +309,27 @@ static void execute_op(EditorConfig *ec, UndoRecord *rec, int is_undo) {
 }
 
 void editor_undo (EditorConfig *ec) {
-    if (ec->doc.undo_count == 0) return;
+    if (ec->doc.undo_count == 0) {
+        editor_set_status_message(ec, "Nothing to undo (undo stack empty)");
+        return;
+    }
     UndoRecord rec = ec->doc.undo_stack[--ec->doc.undo_count];
     execute_op(ec,&rec,1);
     ensure_stack_cap(&ec->doc.redo_stack, &ec->doc.redo_cap, ec->doc.redo_count + 1);
     ec->doc.redo_stack[ec->doc.redo_count++] = rec;
+    editor_set_status_message(ec, "Undo! (%d ops remaining)", ec->doc.undo_count);
 }
 
 void editor_redo (EditorConfig *ec) {
-    if (ec->doc.redo_count == 0) return;
+    if (ec->doc.redo_count == 0) {
+        editor_set_status_message(ec, "Nothing to redo (redo stack empty)");
+        return;
+    }
     UndoRecord rec = ec->doc.redo_stack[--ec->doc.redo_count];
     execute_op(ec,&rec,0);
     ensure_stack_cap(&ec->doc.undo_stack, &ec->doc.undo_cap, ec->doc.undo_count + 1);
     ec->doc.undo_stack[ec->doc.undo_count++] = rec;
+    editor_set_status_message(ec, "Redo! (%d ops remaining)", ec->doc.redo_count);
 }
 
 // ============================================================
