@@ -4,7 +4,7 @@ Fix Log - TextEditor Project
 Date      : 2026-05-14 — 2026-05-19
 Author    : Claude Code (AI assistant)
 =========================================================
-Revisions : 22
+Revisions : 23
 
 =========================================================
 Revision 1 — 2026-05-14
@@ -1127,3 +1127,33 @@ Affected Files
   src/editor.c          —  1 处修改 (line 164-169, 空行 guard)
   src/syntax.c          —  1 处修改 (line 264-282, 搜索高亮重写)
   src/render.c          —  1 处修改 (line 196, static)
+
+=========================================================
+Revision 23 — 2026-05-19
+=========================================================
+
+Summary
+---------------------------------------------------------
+Fix Ctrl+Z/Ctrl+Y not working: ENABLE_PROCESSED_INPUT was
+not cleared in raw mode, causing Windows console to treat
+Ctrl+Z (0x1A) as EOF — ReadFile returned 0 bytes instead.
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] src/terminal.c — enable_raw_mode 补清 ENABLE_PROCESSED_INPUT
+    Before : raw_in &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT);
+    After  : raw_in &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT
+                        | ENABLE_PROCESSED_INPUT);
+    Why    : ENABLE_PROCESSED_INPUT 控制 Windows 控制台对特殊字符的处理：
+              Ctrl+Z (0x1A) → EOF 标记 → ReadFile 返回 0 bytes_read
+              → terminal_read_key 退出循环时 c == '\0' (KEY_NULL)
+              → 分发表无匹配，printable 检查不通过 (0 < 32) → 静默丢弃
+              Ctrl+Y (0x19) 不受 PROCESSED_INPUT 影响，但 redo 需要
+              先有 undo 才有效，用户可能未注意到。
+    副作用: Ctrl+C 不再被系统拦截（变成读入 0x03），但无对应绑定
+            故无操作。Ctrl+Break 硬件信号仍可中断。
+
+Affected Files
+---------------------------------------------------------
+  src/terminal.c        —  1 处修改 (line 50, ENABLE_PROCESSED_INPUT)

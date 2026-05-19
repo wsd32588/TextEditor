@@ -47,7 +47,7 @@ void enable_raw_mode(TerminalState *ts) {
     if (!GetConsoleMode(ts->hOUT, &ts->dwOriginalOutMode)) return;
 
     DWORD raw_in = ts->dwOriginalInMode;
-    raw_in &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT);
+    raw_in &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
     raw_in |= ENABLE_WINDOW_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT;
     SetConsoleMode(ts->hIN, raw_in);
 
