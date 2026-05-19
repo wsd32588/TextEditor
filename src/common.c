@@ -10,6 +10,13 @@
 #include "common.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+static EditorOomHandler g_oom_handler = NULL;
+
+void editor_set_oom_handler(EditorOomHandler handler) {
+    g_oom_handler = handler;
+}
 
 void *editor_safe_realloc(void *ptr, size_t size){
     if (size == 0) {
@@ -18,6 +25,7 @@ void *editor_safe_realloc(void *ptr, size_t size){
     }
     void *temp = realloc(ptr, size);
     if (temp == NULL) {
+        if (g_oom_handler) g_oom_handler();
         perror("realloc failed: out of memory");
         exit(1);
     }
@@ -28,6 +36,7 @@ char *editor_strdup(const char *s){
     size_t len = strlen(s) + 1;
     char *p = malloc(len);
     if (p == NULL) {
+        if (g_oom_handler) g_oom_handler();
         perror("malloc failed: out of memory");
         exit(EXIT_FAILURE);
     }

@@ -19,33 +19,43 @@
 
 void editor_save(EditorConfig *ec)
 {
-    if (ec->filename == NULL) {
+    if (ec->doc.filename == NULL) {
         /* 未命名文件 → 弹出 Save As 提示 */
-        ec->filename = editor_prompt(ec, "Save as: %s (ESC to cancel)");
-        if (ec->filename == NULL) {
+        ec->doc.filename = editor_prompt(ec, "Save as: %s (ESC to cancel)");
+        if (ec->doc.filename == NULL) {
             editor_set_status_message(ec, "Saved aborted");
             return;
         }
-        editor_select_syntax_highlight(ec);              // 后缀确定 → 启用语法高亮
-        for (int i = 0; i < ec->num_rows; i++)
-            editor_update_row(ec, &ec->row[i]);
+        editor_select_syntax_highlight(&ec->doc, &ec->settings);              // 后缀确定 → 启用语法高亮
+        for (int i = 0; i < ec->doc.num_rows; i++)
+            editor_update_row(ec, &ec->doc.row[i]);
     }
 
-    FILE *fp = fopen(ec->filename, "w");
+    char tmp_path[1024];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", ec->doc.filename);
+
+    FILE *fp = fopen(tmp_path, "w");
     if (fp == NULL) {
         editor_set_status_message(ec, "Save failed! I/O error.");
         return;
     }
 
     size_t total_written = 0;
-    for (int i = 0; i < ec->num_rows; i++) {
-        if (ec->row[i].size > 0)
-            total_written += fwrite(ec->row[i].chars, 1, ec->row[i].size, fp);
+    for (int i = 0; i < ec->doc.num_rows; i++) {
+        if (ec->doc.row[i].size > 0)
+            total_written += fwrite(ec->doc.row[i].chars, 1, ec->doc.row[i].size, fp);
         total_written += fwrite("\n", 1, 1, fp);
     }
     fclose(fp);
 
-    ec->dirty = 0;
+    if (rename(tmp_path, ec->doc.filename) != 0) {
+        snprintf(ec->ui.statusmsg, sizeof(ec->ui.statusmsg),
+                 "Save failed! Recovery file: %s.tmp", ec->doc.filename);
+        ec->ui.statusmsg_time = time(NULL);
+        return;
+    }
+
+    ec->doc.dirty = 0;
     editor_set_status_message(ec, "Saved successfully! (%d bytes)", total_written);
 }
 
@@ -55,10 +65,10 @@ void editor_save(EditorConfig *ec)
 
 void editor_open(EditorConfig *ec, const char *filename)
 {
-    if (ec->filename) free(ec->filename);
-    ec->filename = editor_strdup(filename);
+    if (ec->doc.filename) free(ec->doc.filename);
+    ec->doc.filename = editor_strdup(filename);
 
-    editor_select_syntax_highlight(ec);
+    editor_select_syntax_highlight(&ec->doc, &ec->settings);
 
     FILE *fp = fopen(filename, "r");
     if (!fp) return;
@@ -70,7 +80,7 @@ void editor_open(EditorConfig *ec, const char *filename)
 
     while ((c = fgetc(fp)) != EOF) {
         if (c == '\n') {
-            editor_insert_raw(ec, ec->num_rows, line, len);
+            editor_insert_raw(ec, ec->doc.num_rows, line, len);
             len = 0;
         } else {
             if (len >= linecap) {
@@ -83,9 +93,9 @@ void editor_open(EditorConfig *ec, const char *filename)
     }
 
     if (len > 0)
-        editor_insert_raw(ec, ec->num_rows, line, len);
+        editor_insert_raw(ec, ec->doc.num_rows, line, len);
 
     free(line);
     fclose(fp);
-    ec->dirty = 0;
+    ec->doc.dirty = 0;
 }

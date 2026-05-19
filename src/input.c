@@ -23,48 +23,48 @@
 // ============================================================
 
 static void editor_cursor_move_up(EditorConfig *ec) {
-    if (ec->cursor_y > 0) {
-        EditorRow *cur_row = &ec->row[ec->cursor_y];
-        int rx = editor_row_cx_to_rx(ec, cur_row, ec->cursor_x);
-        ec->cursor_y--;
-        ec->cursor_x = editor_row_rx_to_cx(ec, &ec->row[ec->cursor_y], rx);
+    if (ec->view.cursor_y > 0) {
+        EditorRow *cur_row = &ec->doc.row[ec->view.cursor_y];
+        int rx = editor_row_cx_to_rx(ec, cur_row, ec->view.cursor_x);
+        ec->view.cursor_y--;
+        ec->view.cursor_x = editor_row_rx_to_cx(ec, &ec->doc.row[ec->view.cursor_y], rx);
     }
 }
 
 static void editor_cursor_move_down(EditorConfig *ec) {
-    if (ec->cursor_y < ec->num_rows - 1) {
-        EditorRow *cur_row = &ec->row[ec->cursor_y];
-        int rx = editor_row_cx_to_rx(ec, cur_row, ec->cursor_x);
-        ec->cursor_y++;
-        ec->cursor_x = editor_row_rx_to_cx(ec, &ec->row[ec->cursor_y], rx);
+    if (ec->view.cursor_y < ec->doc.num_rows - 1) {
+        EditorRow *cur_row = &ec->doc.row[ec->view.cursor_y];
+        int rx = editor_row_cx_to_rx(ec, cur_row, ec->view.cursor_x);
+        ec->view.cursor_y++;
+        ec->view.cursor_x = editor_row_rx_to_cx(ec, &ec->doc.row[ec->view.cursor_y], rx);
     }
 }
 
 static void editor_cursor_move_right(EditorConfig *ec) {
-    if (ec->cursor_y < ec->num_rows) {
-        EditorRow *row = &ec->row[ec->cursor_y];
-        if (ec->cursor_x < row->size) {
-            Utf8Step s = utf8_step(&row->chars[ec->cursor_x], row->size - ec->cursor_x);
-            ec->cursor_x += s.bytes;
-            if (ec->cursor_x > row->size) ec->cursor_x = row->size;
+    if (ec->view.cursor_y < ec->doc.num_rows) {
+        EditorRow *row = &ec->doc.row[ec->view.cursor_y];
+        if (ec->view.cursor_x < row->size) {
+            Utf8Step s = utf8_step(&row->chars[ec->view.cursor_x], row->size - ec->view.cursor_x);
+            ec->view.cursor_x += s.bytes;
+            if (ec->view.cursor_x > row->size) ec->view.cursor_x = row->size;
         }
     }
 }
 
 static void editor_cursor_move_left(EditorConfig *ec) {
-    if (ec->cursor_x > 0) {
-        EditorRow *row = &ec->row[ec->cursor_y];
+    if (ec->view.cursor_x > 0) {
+        EditorRow *row = &ec->doc.row[ec->view.cursor_y];
         int j = 0;
         int prev_start = 0;
-        while (j < ec->cursor_x && j < row->size) {
+        while (j < ec->view.cursor_x && j < row->size) {
             prev_start = j;
             Utf8Step s = utf8_step(&row->chars[j], row->size - j);
             j += s.bytes;
         }
-        ec->cursor_x = prev_start;
-    } else if (ec->cursor_y > 0) {
-        ec->cursor_y--;
-        ec->cursor_x = ec->row[ec->cursor_y].size;
+        ec->view.cursor_x = prev_start;
+    } else if (ec->view.cursor_y > 0) {
+        ec->view.cursor_y--;
+        ec->view.cursor_x = ec->doc.row[ec->view.cursor_y].size;
     }
 }
 
@@ -73,9 +73,9 @@ static void editor_cursor_move_left(EditorConfig *ec) {
 // ============================================================
 
 static void editor_quit(EditorConfig *ec) {
-    disable_raw_mode(ec);
+    disable_raw_mode(&ec->term);
     DWORD written;
-    WriteFile(ec->hOUT, "\x1b[?1049l", 8, &written, NULL);  // 退出备用屏幕缓冲区
+    WriteFile(ec->term.hOUT, "\x1b[?1049l", 8, &written, NULL);  // 退出备用屏幕缓冲区
     printf("\x1b[2J");                                         // 清屏
     printf("\x1b[H");                                          // 光标归位
     exit(0);
@@ -94,14 +94,14 @@ static void editor_insert_tab(EditorConfig *ec) {
 // ============================================================
 
 static void editor_toggle_overwrite(EditorConfig *ec) {
-    ec->overwrite_mode = !ec->overwrite_mode;
-    editor_set_status_message(ec, ec->overwrite_mode
+    ec->ui.overwrite_mode = !ec->ui.overwrite_mode;
+    editor_set_status_message(ec, ec->ui.overwrite_mode
                               ? "Overwrite mode"
                               : "Insert mode");
 }
 
 static void editor_quick_open(EditorConfig *ec){
-    if (ec->dirty > 0){
+    if (ec->doc.dirty > 0){
         editor_set_status_message(ec,"WARNING: Unsaved changes! Save with Ctrl+S first.");
         return;
     }
@@ -114,11 +114,11 @@ static void editor_quick_open(EditorConfig *ec){
 
     editor_free_all_row(ec);
 
-    ec->cursor_x = 0;
-    ec->cursor_y = 0;
-    ec->col_off = 0;
-    ec->row_off = 0;
-    ec->overwrite_mode = 0;
+    ec->view.cursor_x = 0;
+    ec->view.cursor_y = 0;
+    ec->view.col_off = 0;
+    ec->view.row_off = 0;
+    ec->ui.overwrite_mode = 0;
 
     editor_open(ec,new_filename);
     free(new_filename);
@@ -150,7 +150,9 @@ static const KeyBinding g_key_bindings[] = {
     {KEY_CTRL_G,      editor_find_next},
     {KEY_INS,         editor_toggle_overwrite},
     {KEY_CTRL_P,editor_quick_open},
-    {KEY_CTRL_J,editor_goto_line}
+    {KEY_CTRL_J,editor_goto_line},
+    {KEY_CTRL_Z,editor_undo},
+    {KEY_CTRL_Y,editor_redo}
 };
 
 static const int g_bindings_count = sizeof(g_key_bindings) / sizeof(g_key_bindings[0]);
@@ -160,7 +162,7 @@ static const int g_bindings_count = sizeof(g_key_bindings) / sizeof(g_key_bindin
 // ============================================================
 
 void editor_process_key(EditorConfig *ec) {
-    int c = terminal_read_key(ec);
+    int c = terminal_read_key(&ec->term);
 
     for (int i = 0; i < g_bindings_count; i++) {
         if (g_key_bindings[i].key_code == c) {

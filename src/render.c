@@ -63,21 +63,21 @@ static int editor_syntax_to_color(int hl)
 static void editor_scroll(EditorConfig *ec)
 {
     /* 垂直滚动：确保光标在可见区内 */
-    if (ec->cursor_y < ec->row_off)
-        ec->row_off = ec->cursor_y;
-    if (ec->cursor_y >= ec->row_off + ec->screen_rows - 2)
-        ec->row_off = ec->cursor_y - (ec->screen_rows - 2) + 1;
+    if (ec->view.cursor_y < ec->view.row_off)
+        ec->view.row_off = ec->view.cursor_y;
+    if (ec->view.cursor_y >= ec->view.row_off + ec->view.screen_rows - 2)
+        ec->view.row_off = ec->view.cursor_y - (ec->view.screen_rows - 2) + 1;
 
     /* 水平滚动：光标 render-space 位置 → col_off */
     int rx = 0;                               // 光标在 render-space 的列
-    if (ec->cursor_y < ec->num_rows)
-        rx = editor_row_cx_to_rx(ec, &ec->row[ec->cursor_y], ec->cursor_x);
+    if (ec->view.cursor_y < ec->doc.num_rows)
+        rx = editor_row_cx_to_rx(ec, &ec->doc.row[ec->view.cursor_y], ec->view.cursor_x);
 
-    if (rx < ec->col_off)                     // 光标出了左边界
-        ec->col_off = rx;
-    if (rx >= ec->col_off + ec->screen_cols - ec->gutter_width - 1)  // 光标超出右边界
-        ec->col_off = rx - (ec->screen_cols - ec->gutter_width - 1) + 1;
-    if (ec->col_off < 0) ec->col_off = 0;
+    if (rx < ec->view.col_off)                     // 光标出了左边界
+        ec->view.col_off = rx;
+    if (rx >= ec->view.col_off + ec->view.screen_cols - ec->view.gutter_width - 1)  // 光标超出右边界
+        ec->view.col_off = rx - (ec->view.screen_cols - ec->view.gutter_width - 1) + 1;
+    if (ec->view.col_off < 0) ec->view.col_off = 0;
 }
 
 // ============================================================
@@ -86,34 +86,34 @@ static void editor_scroll(EditorConfig *ec)
 
 static void editor_draw_rows(AppendBuffer *ab, EditorConfig *ec)
 {
-    for (int y = 0; y < ec->screen_rows - 2; y++) {
-        int filerow = y + ec->row_off;           // 文件中实际的行号
+    for (int y = 0; y < ec->view.screen_rows - 2; y++) {
+        int filerow = y + ec->view.row_off;           // 文件中实际的行号
 
         abuf_append(ab, "\x1b[K", 3);            // 清空本行
 
         char ln_buf[32];
         int ln_len;
-        if (filerow < ec->num_rows) {
+        if (filerow < ec->doc.num_rows) {
             /* 行号（青色） */
             ln_len = snprintf(ln_buf, sizeof(ln_buf), "\x1b[36m%*d \x1b[39m",
-                              ec->gutter_width, filerow + 1);
+                              ec->view.gutter_width, filerow + 1);
             abuf_append(ab, ln_buf, ln_len);
 
-            int available_cols = ec->screen_cols - ec->gutter_width - 1;
+            int available_cols = ec->view.screen_cols - ec->view.gutter_width - 1;
 
             /* Walk cells[] by visual columns: map col_off → cell index,
              * then measure how many cells fit within available_cols. */
             int cell_start = 0;
             int current_rx = 0;
-            while (cell_start < ec->row[filerow].cell_count && current_rx < ec->col_off) {
-                current_rx += ec->row[filerow].cells[cell_start].display_width;
+            while (cell_start < ec->doc.row[filerow].cell_count && current_rx < ec->view.col_off) {
+                current_rx += ec->doc.row[filerow].cells[cell_start].display_width;
                 cell_start++;
             }
 
             int cell_n = 0;
             int printed_rx = 0;
-            while (cell_start + cell_n < ec->row[filerow].cell_count) {
-                int w = ec->row[filerow].cells[cell_start + cell_n].display_width;
+            while (cell_start + cell_n < ec->doc.row[filerow].cell_count) {
+                int w = ec->doc.row[filerow].cells[cell_start + cell_n].display_width;
                 if (printed_rx + w > available_cols) break;
                 printed_rx += w;
                 cell_n++;
@@ -121,7 +121,7 @@ static void editor_draw_rows(AppendBuffer *ab, EditorConfig *ec)
 
             int current_color = -1;
             for (int i = 0; i < cell_n; i++) {
-                RenderCell *cell = &ec->row[filerow].cells[cell_start + i];
+                RenderCell *cell = &ec->doc.row[filerow].cells[cell_start + i];
                 unsigned char hl = cell->hl;
 
                 if (hl == HL_NORMAL) {
@@ -146,7 +146,7 @@ static void editor_draw_rows(AppendBuffer *ab, EditorConfig *ec)
             abuf_append(ab, "\x1b[39m", 5);
         } else {
             ln_len = snprintf(ln_buf, sizeof(ln_buf), "\x1b[36m%*s \x1b[39m",
-                              ec->gutter_width, "~");
+                              ec->view.gutter_width, "~");
             abuf_append(ab, ln_buf, ln_len);       // 空白行显示波浪号
         }
 
@@ -163,21 +163,21 @@ static void editor_draw_status_bar(AppendBuffer *ab, EditorConfig *ec)
     abuf_append(ab, "\x1b[7m", 4);               // 反白
     char status[80], rstatus[80];
 
-    const char *display_name = ec->filename ? ec->filename : "[No Name]";
-    const char *line_label = (ec->num_rows == 1) ? "line" : "lines";
-    const char *dirty_marker = ec->dirty ? "(modified)" : "";
+    const char *display_name = ec->doc.filename ? ec->doc.filename : "[No Name]";
+    const char *line_label = (ec->doc.num_rows == 1) ? "line" : "lines";
+    const char *dirty_marker = ec->doc.dirty ? "(modified)" : "";
     int len = snprintf(status, sizeof(status), "%.20s - %d %s %s",
-                       display_name, ec->num_rows, line_label, dirty_marker);
+                       display_name, ec->doc.num_rows, line_label, dirty_marker);
 
     int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d",
-                        ec->cursor_y + 1, ec->num_rows);
-    if (len > ec->screen_cols) len = ec->screen_cols;
+                        ec->view.cursor_y + 1, ec->doc.num_rows);
+    if (len > ec->view.screen_cols) len = ec->view.screen_cols;
 
     abuf_append(ab, status, len);
 
     /* 左对齐文件名，右对齐行号 */
-    while (len < ec->screen_cols) {
-        if (ec->screen_cols - len == rlen) {     // 刚好够放 rstatus
+    while (len < ec->view.screen_cols) {
+        if (ec->view.screen_cols - len == rlen) {     // 刚好够放 rstatus
             abuf_append(ab, rstatus, rlen);
             break;
         }
@@ -196,11 +196,11 @@ static void editor_draw_status_bar(AppendBuffer *ab, EditorConfig *ec)
 void editor_draw_message_bar(AppendBuffer *ab, EditorConfig *ec)
 {
     abuf_append(ab, "\x1b[K", 3);                // 清空本行
-    int msglen = strlen(ec->statusmsg);
-    if (msglen > ec->screen_cols) msglen = ec->screen_cols;
+    int msglen = strlen(ec->ui.statusmsg);
+    if (msglen > ec->view.screen_cols) msglen = ec->view.screen_cols;
 
-    if (msglen > 0 && time(NULL) - ec->statusmsg_time < 5)  // 5 秒超时
-        abuf_append(ab, ec->statusmsg, msglen);
+    if (msglen > 0 && time(NULL) - ec->ui.statusmsg_time < 5)  // 5 秒超时
+        abuf_append(ab, ec->ui.statusmsg, msglen);
 }
 
 // ============================================================
@@ -210,7 +210,7 @@ void editor_draw_message_bar(AppendBuffer *ab, EditorConfig *ec)
 void editor_refresh_screen(EditorConfig *ec)
 {
     /* 计算行号栏宽度：至少 4 位 */
-    int max_lines = ec->num_rows > 0 ? ec->num_rows : 1;
+    int max_lines = ec->doc.num_rows > 0 ? ec->doc.num_rows : 1;
     int digits = 1;
     while (max_lines >= 10) {
         digits++;
@@ -218,7 +218,7 @@ void editor_refresh_screen(EditorConfig *ec)
     }
     if (digits < 4)
         digits = 4;
-    ec->gutter_width = digits + 1;               // 数字 + 1 空格
+    ec->view.gutter_width = digits + 1;               // 数字 + 1 空格
 
     editor_scroll(ec);
 
@@ -232,18 +232,18 @@ void editor_refresh_screen(EditorConfig *ec)
 
     /* 光标定位：屏幕坐标 = (cursor_y - row_off + 1, rx - col_off + gutter + 2) */
     int rx = 0;                                  // render-space 光标列
-    if (ec->cursor_y < ec->num_rows)
-        rx = editor_row_cx_to_rx(ec, &ec->row[ec->cursor_y], ec->cursor_x);
+    if (ec->view.cursor_y < ec->doc.num_rows)
+        rx = editor_row_cx_to_rx(ec, &ec->doc.row[ec->view.cursor_y], ec->view.cursor_x);
 
     char buf[32];
     snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
-             (ec->cursor_y - ec->row_off) + 1,
-             (rx - ec->col_off) + ec->gutter_width + 2);
+             (ec->view.cursor_y - ec->view.row_off) + 1,
+             (rx - ec->view.col_off) + ec->view.gutter_width + 2);
     abuf_append(&ab, buf, strlen(buf));
 
     abuf_append(&ab, "\x1b[?25h", 6);            // 显示光标
 
     DWORD bytes_written;
-    WriteFile(ec->hOUT, ab.b, ab.len, &bytes_written, NULL);
+    WriteFile(ec->term.hOUT, ab.b, ab.len, &bytes_written, NULL);
     abuf_free(&ab);
 }

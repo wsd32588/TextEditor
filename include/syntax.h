@@ -3,8 +3,8 @@
 
 #include "common.h"
 
-void editor_select_syntax_highlight(EditorConfig *ec);
-void editor_update_syntax(EditorConfig *ec, EditorRow *row);
+void editor_select_syntax_highlight(Document *doc, EditorSettings *settings);
+void editor_update_syntax(Document *doc, EditorSettings *settings, UIState *ui, EditorRow *row);
 
 extern struct EditorSyntax g_high_light_data_base[];
 extern const int g_high_light_data_base_entries;

@@ -3,7 +3,7 @@
  *
  * g_high_light_data_base[] defines rules for each language.
  * editor_select_syntax_highlight() picks the right entry by
- * filename suffix and sets ec->tab_stop accordingly.
+ * filename suffix and sets ec->settings.tab_stop accordingly.
  *
  * editor_update_syntax() annotates row->cells[].hl with colour tags
  * by scanning the cell array:
@@ -14,7 +14,7 @@
  *      of the line is filled with HL_COMMENT.
  *   3. Keywords are matched at word boundaries via strncmp.
  *      Trailing '|' in the keyword table marks type keywords -> HL_KEYWORD2.
- *   4. Active search terms (ec->search_query) are highlighted last
+ *   4. Active search terms (ec->ui.search_query) are highlighted last
  *      via strstr, potentially overriding keyword colours.
  */
 #include <ctype.h>
@@ -147,13 +147,31 @@ static int cell_match_seq(RenderCell *cells, int start, int count, const char *s
     return 1;
 }
 
-void editor_update_syntax(EditorConfig *ec, EditorRow *start_row) {
-    int current_idx = start_row - ec->row;
+// FNV-1a hash — 快速计算行内容指纹，用于增量语法跳过未变更行
+static size_t row_hash(const char *s, int len) {
+    size_t h = 14695981039346656037ULL;
+    for (int i = 0; i < len; i++) {
+        h ^= (unsigned char)s[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
 
-    while (current_idx < ec->num_rows) {
-        EditorRow *row = &ec->row[current_idx];
+void editor_update_syntax(Document *doc, EditorSettings *settings, UIState *ui, EditorRow *start_row) {
+    int current_idx = start_row - doc->row;
 
-        int in_comment = (current_idx > 0 && ec->row[current_idx - 1].highlight_open_comment);
+    while (current_idx < doc->num_rows) {
+        EditorRow *row = &doc->row[current_idx];
+
+        int in_comment = (current_idx > 0 && doc->row[current_idx - 1].highlight_open_comment);
+
+        // 内容指纹 + 注释状态都匹配 → 跳过（行未修改，状态没变）
+        size_t h = row_hash(row->chars, row->size);
+        if (h == row->syntax_hash && row->highlight_open_comment == in_comment) {
+            row->syntax_hash = h;
+            break;
+        }
+        row->syntax_hash = h;
 
         if (row->cell_count == 0) {
             int changed = (row->highlight_open_comment != in_comment);
@@ -166,11 +184,11 @@ void editor_update_syntax(EditorConfig *ec, EditorRow *start_row) {
         for (int i = 0; i < row->cell_count; i++)
             row->cells[i].hl = HL_NORMAL;
 
-        if (ec->syntax != NULL) {
-            char **keywords = ec->syntax->keywords;
-            char *scs = ec->syntax->single_line_comment_start;
-            char *mcs = ec->syntax->multiline_comment_start;
-            char *mce = ec->syntax->multiline_comment_end;
+        if (settings->syntax != NULL) {
+            char **keywords = settings->syntax->keywords;
+            char *scs = settings->syntax->single_line_comment_start;
+            char *mcs = settings->syntax->multiline_comment_start;
+            char *mce = settings->syntax->multiline_comment_end;
 
             int scs_len = scs ? strlen(scs) : 0;
             int mcs_len = mcs ? strlen(mcs) : 0;
@@ -241,16 +259,16 @@ void editor_update_syntax(EditorConfig *ec, EditorRow *start_row) {
                 prev_sep = cell_is_sep(cp);
                 i++;
             }
-        } // end if (ec->syntax != NULL)
+        } // end if (settings->syntax != NULL)
 
         /* 搜索匹配高亮 */
-        if (ec->search_query != NULL) {
-            int query_len = strlen(ec->search_query);
+        if (ui->search_query != NULL) {
+            int query_len = strlen(ui->search_query);
             if (query_len > 0 && query_len <= row->cell_count) {
                 for (int i = 0; i <= row->cell_count - query_len; i++) {
                     int match = 1;
                     for (int k = 0; k < query_len; k++) {
-                        if (row->cells[i + k].codepoint != (unsigned char)ec->search_query[k]) {
+                        if (row->cells[i + k].codepoint != (unsigned char)ui->search_query[k]) {
                             match = 0; break;
                         }
                     }
@@ -275,12 +293,12 @@ void editor_update_syntax(EditorConfig *ec, EditorRow *start_row) {
 //  语法嗅探
 // ============================================================
 
-void editor_select_syntax_highlight(EditorConfig *ec) {
-    ec->syntax = NULL;
-    ec->tab_stop = EDITOR_TAB_STOP;
-    if (ec->filename == NULL) return;
+void editor_select_syntax_highlight(Document *doc, EditorSettings *settings) {
+    settings->syntax = NULL;
+    settings->tab_stop = EDITOR_TAB_STOP;
+    if (doc->filename == NULL) return;
 
-    char *ext = strrchr(ec->filename, '.');
+    char *ext = strrchr(doc->filename, '.');
 
     for (int j = 0; j < g_high_light_data_base_entries; j++) {
         struct EditorSyntax *s = &g_high_light_data_base[j];
@@ -288,9 +306,9 @@ void editor_select_syntax_highlight(EditorConfig *ec) {
         while (s->file_match[i]) {
             int is_ext = (s->file_match[i][0] == '.');
             if ((is_ext && ext && !strcmp(ext, s->file_match[i])) ||
-                (!is_ext && strstr(ec->filename, s->file_match[i]))) {
-                ec->syntax = s;
-                ec->tab_stop = s->tab_stop;
+                (!is_ext && strstr(doc->filename, s->file_match[i]))) {
+                settings->syntax = s;
+                settings->tab_stop = s->tab_stop;
                 return;
             }
             i++;

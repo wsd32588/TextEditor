@@ -1,0 +1,2068 @@
+=== TextEditor Codebase Dump ===
+Generated: Tue May 19 17:55:34     2026
+
+=== HEAD ===
+
+============================================================
+FILE: include/common.h
+============================================================
+#ifndef TEXTEDITOR_COMMON_H
+#define TEXTEDITOR_COMMON_H
+
+#include <Windows.h>
+#include <stdint.h>
+#include <time.h>
+
+// ============================================================
+//  语法高亮类型
+// ============================================================
+
+typedef struct
+{
+    uint32_t codepoint;  // Unicode 码点
+    int byte_len;        // 这个字符占几个字节
+    int display_width;   // 终端视觉宽度
+}Utf8Char;
+
+Utf8Char utf8_decode(const char *s,int s_len);
+
+typedef struct {
+    int bytes;   // byte_len
+    int cols;    // display_width
+} Utf8Step;
+
+Utf8Step utf8_step(const char *s, int s_len);
+
+typedef struct {
+    uint32_t codepoint;    // Unicode 码点 (用于识别字符)
+    uint8_t  byte_len;     // 原文占用的字节数 (制表符占位填0)
+    uint8_t  display_width;// 终端视觉宽度 (1或2)
+    uint8_t  hl;           // 语法高亮颜色 (HL_NORMAL 等)
+} RenderCell;
+
+int utf8_encode(uint32_t cp,char *out);
+
+typedef enum {
+    HL_NORMAL = 0,
+    HL_NONPRINT,
+    HL_COMMENT,
+    HL_ML_COMMENT,
+    HL_KEYWORD1,
+    HL_KEYWORD2,
+    HL_STRING,
+    HL_NUMBER,
+    HL_MATCH
+} HighlightType;
+
+typedef enum {
+    HL_FLAG_NONE         = 0,
+    HL_HIGHLIGHT_STRINGS = (1 << 0),
+    HL_HIGHLIGHT_NUMBERS = (1 << 1)
+} HighlightFlag;
+
+typedef enum {
+    OP_INSERT_CHARS,    // 插入字符（打字、粘贴）
+    OP_DELETE_CHARS,    // 删除字符（Backspace, Delete）
+    OP_INSERT_LINE,     // 换行（Enter键）
+    OP_DELETE_LINE,     // 删除行（在行首按Backspace合并行）
+}OpType;
+
+typedef struct {
+    OpType type;
+    int cursor_y;     // 操作发生时的行号
+    int cursor_x;     // 操作发生时的列号（chars 空间的字节索引）
+    char *text;       // 插入或删除的具体文本
+    int text_len;     // 文本字节数
+    time_t timestamp; // 用于合并连续输入的防抖时间戳
+} UndoRecord;
+
+#define MAX_UNDO 500
+
+/*
+ * Syntax rule table for one programming language.
+ *
+ * file_match[] — suffixes (".c") or substrings to detect this language
+ * keywords[]   — token list; trailing '|' = HL_KEYWORD2 (type keywords)
+ * tab_stop     — indent width in spaces for this language
+ */
+struct EditorSyntax {
+    char **file_match;
+    char **keywords;
+    char *single_line_comment_start;
+    char *multiline_comment_start;
+    char *multiline_comment_end;
+    int flags;
+    int tab_stop;
+};
+
+// ============================================================
+//  文本行
+// ============================================================
+
+/*
+ * One line of text and its display derivatives.
+ *
+ * Data flow:  input → chars → editor_update_row()
+ *                   ├── cells[]  (RenderCell array, tabs → space cells)
+ *                   └── editor_update_syntax()
+ *                        └── cells[].hl  (per-cell colour)
+ *
+ * Invariant: after any chars mutation, editor_update_row() must run
+ * to rebuild cells[] and re-trigger highlighting.
+ */
+typedef struct {
+    int size;                  // chars 字节数（逻辑长度，\t 算 1 字节）
+    char *chars;               // 原始文本（含 \t）
+    int cell_count;             // cells 数组长度
+    RenderCell *cells;          // 渲染单元数组（\t 展开为空格 cell，byte_len=0）
+    int highlight_open_comment; // 上行是否有未闭合多行注释
+} EditorRow;
+
+// ============================================================
+//  子状态 — 按关注点拆分
+// ============================================================
+
+// 视图状态 — 光标位置、滚动偏移、屏幕尺寸
+typedef struct {
+    int cursor_x, cursor_y;
+    int row_off, col_off;
+    int screen_rows, screen_cols;
+    int gutter_width;
+} ViewState;
+
+// 文档状态 — 文本数据、文件信息、修改历史
+typedef struct {
+    char *filename;
+    int num_rows;
+    EditorRow *row;
+    int dirty;
+
+    UndoRecord undo_stack[MAX_UNDO];
+    int undo_count;
+    UndoRecord redo_stack[MAX_UNDO];
+    int redo_count;
+    int is_action_locked;
+} Document;
+
+// 终端底层 — Windows 平台 API 句柄和原始模式备份
+typedef struct {
+    HANDLE hIN, hOUT;
+    int raw_mode;
+    DWORD dwOriginalInMode, dwOriginalOutMode;
+    UINT uOriginalOutputCP, uOriginalInputCP;
+} TerminalState;
+
+// UI 交互 — 状态栏消息、输入模式、搜索词
+typedef struct {
+    char statusmsg[80];
+    time_t statusmsg_time;
+    int overwrite_mode;
+    char *search_query;
+} UIState;
+
+// 编辑器设置 — 语法高亮规则和排版偏好
+typedef struct {
+    struct EditorSyntax *syntax;
+    int tab_stop;
+} EditorSettings;
+
+// ============================================================
+//  编辑器根状态（组合上述 5 个子结构）
+// ============================================================
+
+typedef struct EditorConfig {
+    ViewState view;
+    Document doc;
+    TerminalState term;
+    UIState ui;
+    EditorSettings settings;
+} EditorConfig;
+
+// ============================================================
+//  常量 & 工具宏
+// ============================================================
+
+#define EDITOR_TAB_STOP 4
+
+enum EditorKeys {
+    KEY_NULL = 0,
+    KEY_CTRL_C = 3,   KEY_CTRL_D = 4,   KEY_CTRL_F = 6,   KEY_CTRL_G = 7,
+    KEY_CTRL_H = 8,   KEY_CTRL_J = 10,  KEY_CTRL_P = 16,
+    KEY_TAB = 9,
+    KEY_ENTER = 13,
+    KEY_CTRL_Q = 17,  KEY_CTRL_S = 19,  KEY_CTRL_U = 21,
+    KEY_ESC = 27,
+    KEY_BACKSPACE = 127,
+
+    KEY_ARROW_LEFT  = 1000, KEY_ARROW_RIGHT,
+    KEY_ARROW_UP,            KEY_ARROW_DOWN,
+    KEY_DEL,                 KEY_HOME,     KEY_END,
+    KEY_PAGE_UP,             KEY_PAGE_DOWN,
+    KEY_INS,
+};
+
+// ============================================================
+//  工具函数
+// ============================================================
+
+
+void *editor_safe_realloc(void *ptr, size_t size);
+char *editor_strdup(const char *s);
+int utf8_char_length(unsigned char c);
+int utf8_char_display_width(unsigned char c);
+#endif // TEXTEDITOR_COMMON_H
+
+============================================================
+FILE: include/editor.h
+============================================================
+#ifndef TEXTEDITOR_EDITOR_H
+#define TEXTEDITOR_EDITOR_H
+
+#include "common.h"
+
+void editor_init(EditorConfig *ec);
+void editor_insert_raw(EditorConfig *ec, int at, const char *s, size_t len);
+void editor_set_status_message(EditorConfig *ec, const char *fmt, ...);
+void editor_insert_char(EditorConfig *ec, int c);
+void editor_row_insert_char(EditorConfig *ec, EditorRow *row, int at, int c);
+void editor_delChar(EditorConfig *ec);
+void editor_deleteCharAtCursor(EditorConfig *ec);
+void editor_insert_newline(EditorConfig *ec);
+char *editor_prompt(EditorConfig *ec, const char *prompt);
+void editor_find(EditorConfig *ec);
+void editor_find_next(EditorConfig *ec);
+void editor_goto_line(EditorConfig *ec);
+int editor_row_cx_to_rx(EditorConfig *ec, EditorRow *row,int cx);
+int editor_row_rx_to_cx(EditorConfig *ec, EditorRow *row, int rx);
+void editor_update_row(EditorConfig *ec, EditorRow *row);
+void editor_free_all_row(EditorConfig *ec);
+int  editor_row_del_char(EditorConfig *ec, EditorRow *row, int at);
+
+void editor_push_undo(EditorConfig *ec, OpType type, int y, int x, const char *text, int len);
+void editor_undo(EditorConfig *ec);
+void editor_redo(EditorConfig *ec);
+
+#endif // TEXTEDITOR_EDITOR_H
+
+============================================================
+FILE: include/input.h
+============================================================
+#ifndef TEXTEDITOR_INPUT_H
+#define TEXTEDITOR_INPUT_H
+
+#include "common.h"
+
+void editor_process_key(EditorConfig *ec);
+
+#endif // TEXTEDITOR_INPUT_H
+
+============================================================
+FILE: include/render.h
+============================================================
+#ifndef TEXTEDITOR_RENDER_H
+#define TEXTEDITOR_RENDER_H
+
+#include "common.h"
+
+// 追加缓冲区：批量累积输出后一次性写入，减少系统调用
+typedef struct {
+    char *b;
+    int len;
+} AppendBuffer;
+
+#define ABUF_INIT { NULL, 0 }
+
+void editor_refresh_screen(EditorConfig *ec);
+
+#endif // TEXTEDITOR_RENDER_H
+
+============================================================
+FILE: include/syntax.h
+============================================================
+#ifndef TEXTEDITOR_SYNTAX_H
+#define TEXTEDITOR_SYNTAX_H
+
+#include "common.h"
+
+void editor_select_syntax_highlight(EditorConfig *ec);
+void editor_update_syntax(EditorConfig *ec, EditorRow *row);
+
+extern struct EditorSyntax g_high_light_data_base[];
+extern const int g_high_light_data_base_entries;
+
+#endif // TEXTEDITOR_SYNTAX_H
+
+============================================================
+FILE: include/terminal.h
+============================================================
+#ifndef TEXTEDITOR_TERMINAL_H
+#define TEXTEDITOR_TERMINAL_H
+
+#include "common.h"
+
+void disable_raw_mode(EditorConfig *ec);
+void enable_raw_mode(EditorConfig *ec);
+int terminal_read_key(EditorConfig *ec);
+int terminal_get_window_size(EditorConfig *ec, int *rows, int *cols);
+
+#endif // TEXTEDITOR_TERMINAL_H
+
+============================================================
+FILE: include/fileio.h
+============================================================
+#ifndef TEXTEDITOR_FILEIO_H
+#define TEXTEDITOR_FILEIO_H
+
+#include "common.h"
+
+void editor_save(EditorConfig *ec);
+void editor_open(EditorConfig *ec, const char *filename);
+
+#endif // TEXTEDITOR_FILEIO_H
+
+============================================================
+FILE: src/Main/main.c
+============================================================
+/*
+ * Entry point and terminal initialisation (VT processing + raw mode).
+ *
+ * Enables ENABLE_VIRTUAL_TERMINAL_PROCESSING on the output handle so
+ * ANSI escape sequences (\x1b[...) are interpreted by the Windows
+ * console.  Without this the editor would print raw escape codes.
+ */
+#include "common.h"
+#include "input.h"
+#include "terminal.h"
+#include "render.h"
+#include "editor.h"
+#include "fileio.h"
+#include <stdio.h>
+
+int main(int argc, char *argv[])
+{
+    EditorConfig ec = {0};
+
+    enable_raw_mode(&ec);
+    editor_init(&ec);
+
+    editor_set_status_message(&ec, "HELP: Ctrl-S = save | Ctrl-Q = quit");
+    if (argc >= 2)
+        editor_open(&ec, argv[1]);
+
+    while (1) {
+        editor_refresh_screen(&ec);
+        editor_process_key(&ec);
+    }
+    return 0;
+}
+
+============================================================
+FILE: src/common.c
+============================================================
+/*
+ * Safe memory — abort on OOM instead of returning NULL.
+ *
+ * editor_safe_realloc wraps realloc with fatal exit on failure.
+ * Pass ptr = NULL for fresh allocations (realloc(NULL, n) ≡ malloc(n)).
+ * editor_strdup clones a C string, fatally exiting on OOM.
+ *
+ * MSVC does not define strdup, so editor_strdup fills that gap.
+ */
+#include "common.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+void *editor_safe_realloc(void *ptr, size_t size){
+    if (size == 0) {
+        free(ptr);
+        return NULL;
+    }
+    void *temp = realloc(ptr, size);
+    if (temp == NULL) {
+        perror("realloc failed: out of memory");
+        exit(1);
+    }
+    return temp;
+}
+
+char *editor_strdup(const char *s){
+    size_t len = strlen(s) + 1;
+    char *p = malloc(len);
+    if (p == NULL) {
+        perror("malloc failed: out of memory");
+        exit(EXIT_FAILURE);
+    }
+    memcpy(p, s, len);
+    return p;
+}
+
+Utf8Char utf8_decode(const char *s,int s_len){
+    Utf8Char result = {0,1,1};
+    if (s_len < 1) return result;
+    unsigned char c = (unsigned char)s[0];
+    result.codepoint = c;
+    // 1个字节(ASCII)
+    if (c <= 0x7F){
+        result.display_width = 1;
+        return result;
+    }else if (c >= 0xC2 && c <= 0xDF && s_len >= 2){
+        if (((unsigned char)s[1] & 0xC0) == 0x80){
+            result.codepoint = ((c & 0x1F) << 6) | ((unsigned char)s[1] & 0x3F);
+            result.byte_len = 2;
+            result.display_width = 1;
+        }
+    }else if (c >= 0xE0 && c <= 0xEF && s_len >= 3){
+        if (((unsigned char)s[1] & 0xC0) == 0x80 &&
+            ((unsigned char)s[2] & 0xC0) == 0x80){
+            result.codepoint = ((c & 0x0F) << 12)
+                            | (((unsigned char)s[1] & 0x3F) << 6)
+                            | ((unsigned char)s[2] & 0x3F);
+            result.byte_len = 3;
+            result.display_width = 2;//CJK
+        }
+    }else if (c >= 0xF0 && c <= 0xF4 && s_len >= 4){
+        if (((unsigned char)s[1] & 0xC0) == 0x80 &&
+            ((unsigned char)s[2] & 0xC0) == 0x80 &&
+            ((unsigned char)s[3] & 0xC0) == 0x80){
+            result.codepoint = ((c & 0x07) << 18)
+                            | (((unsigned char)s[1] & 0x3F) << 12)
+                            | (((unsigned char)s[2] & 0x3F) << 6)
+                            | ((unsigned char)s[3] & 0x3F);
+            result.byte_len = 4;
+            result.display_width = 2;//emoji
+            }
+    }
+    return result;
+}
+
+int utf8_encode(uint32_t cp, char *out) {
+    if (cp <= 0x7F) {
+        out[0] = (char)cp;
+        return 1;
+    } else if (cp <= 0x7FF) {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    } else if (cp <= 0xFFFF) {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    } else if (cp <= 0x10FFFF) {
+        out[0] = (char)(0xF0 | (cp >> 18));
+        out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[3] = (char)(0x80 | (cp & 0x3F));
+        return 4;
+    }
+    out[0] = '?';
+    return 1;
+}
+
+Utf8Step utf8_step(const char *s, int s_len){
+    Utf8Char uc = utf8_decode(s, s_len);
+    return (Utf8Step){ uc.byte_len, uc.display_width };
+}
+
+
+============================================================
+FILE: src/editor.c
+============================================================
+/*
+ * Core editing operations: row management, character insertion,
+ * deletion, line splitting, and the search prompt.
+ *
+ * Every mutation of EditorRow::chars is followed by a call to
+ * editor_update_row() to rebuild the render buffer and re-run
+ * syntax highlighting, maintaining the invariant
+ *   chars → render = 1:1 (with \t expanded to spaces).
+ */
+#include "editor.h"
+#include "common.h"
+#include "terminal.h"
+#include "render.h"
+#include "syntax.h"
+#include <ctype.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// ============================================================
+//  编辑器初始化
+// ============================================================
+
+void editor_init(EditorConfig *ec) {
+    ec->view.cursor_x = 0;
+    ec->view.cursor_y = 0;
+    ec->view.row_off = 0;
+    ec->view.col_off = 0;
+    ec->doc.num_rows = 0;
+    ec->doc.row = NULL;
+    ec->doc.dirty = 0;
+    ec->doc.filename = NULL;
+    ec->settings.syntax = NULL;
+    ec->view.gutter_width = 0;
+    ec->ui.search_query = NULL;
+    ec->settings.tab_stop = EDITOR_TAB_STOP;
+    ec->ui.overwrite_mode = 0;
+
+    DWORD written;
+    WriteFile(ec->term.hOUT, "\x1b[?1049h", 8, &written, NULL);
+
+    if (terminal_get_window_size(ec, &ec->view.screen_rows, &ec->view.screen_cols) == -1) {
+        printf("Failed to get window size!\n");
+        exit(1);
+    }
+}
+// ============================================================
+//  清空当前文件占用的所有行内存
+// ============================================================
+void editor_free_all_row(EditorConfig *ec){
+    for (int i = 0; i < ec->doc.num_rows; i++){
+        free(ec->doc.row[i].chars);
+        free(ec->doc.row[i].cells);
+    }
+    free(ec->doc.row);
+    ec->doc.row = NULL;
+    ec->doc.num_rows = 0;
+    ec->doc.dirty = 0;
+
+    if (ec->doc.filename){
+        free(ec->doc.filename);
+        ec->doc.filename = NULL;
+    }
+    if (ec->ui.search_query) {
+        free(ec->ui.search_query);
+        ec->ui.search_query = NULL;
+    }
+}
+
+// ============================================================
+//  坐标转换:  chars 空间 → render 空间
+// ============================================================
+
+int editor_row_cx_to_rx(EditorConfig *ec, EditorRow *row, int cx)
+{
+    int rx = 0;
+    int j = 0;
+    while (j < cx && j < row->size) {
+        if (row->chars[j] == '\t') {
+            rx += (ec->settings.tab_stop - 1) - (rx % ec->settings.tab_stop) + 1;
+            j++;
+        } else {
+            Utf8Step s = utf8_step(&row->chars[j], row->size - j);
+            rx += s.cols;
+            j += s.bytes;
+        }
+    }
+    return rx;
+}
+
+/* 将终端屏幕的视觉列索引 (rx) 逆向转换为 chars 空间的字节索引 (cx) */
+int editor_row_rx_to_cx(EditorConfig *ec, EditorRow *row, int rx)
+{
+    int cur_rx = 0;
+    int cx = 0;
+    while (cx < row->size) {
+        if (row->chars[cx] == '\t') {
+            int tab_width = (ec->settings.tab_stop - 1) - (cur_rx % ec->settings.tab_stop) + 1;
+            if (cur_rx + tab_width > rx) return cx;
+            cur_rx += tab_width;
+            cx++;
+        } else {
+            Utf8Step s = utf8_step(&row->chars[cx], row->size - cx);
+            if (cur_rx + s.cols > rx) return cx;
+            cur_rx += s.cols;
+            cx += s.bytes;
+        }
+    }
+    return cx;
+}
+
+// ============================================================
+//  Render 缓冲区生成
+// ============================================================
+
+void editor_update_row(EditorConfig *ec, EditorRow *row) {
+    // Pass 1: count cells
+    int cell_count = 0;
+    int j = 0;
+    int rx = 0;
+    while (j < row->size) {
+        if (row->chars[j] == '\t') {
+            int spaces = (ec->settings.tab_stop - 1) - (rx % ec->settings.tab_stop) + 1;
+            cell_count += spaces;
+            rx += spaces;
+            j++;
+        } else {
+            Utf8Step s = utf8_step(&row->chars[j], row->size - j);
+            cell_count++;
+            rx += s.cols;
+            j += s.bytes;
+        }
+    }
+
+    // Allocate
+    free(row->cells);
+    row->cells = editor_safe_realloc(NULL, cell_count * sizeof(RenderCell));
+    row->cell_count = cell_count;
+
+    // Pass 2: fill cells
+    int ci = 0;
+    j = 0;
+    rx = 0;
+    while (j < row->size) {
+        if (row->chars[j] == '\t') {
+            int spaces = (ec->settings.tab_stop - 1) - (rx % ec->settings.tab_stop) + 1;
+            for (int k = 0; k < spaces; k++)
+                row->cells[ci++] = (RenderCell){' ', 0, 1, HL_NORMAL};
+            rx += spaces;
+            j++;
+        } else {
+            Utf8Char uc = utf8_decode(&row->chars[j], row->size - j);
+            row->cells[ci++] = (RenderCell){uc.codepoint, (uint8_t)uc.byte_len,
+                                            (uint8_t)uc.display_width, HL_NORMAL};
+            rx += uc.display_width;
+            j += uc.byte_len;
+        }
+    }
+
+    editor_update_syntax(ec, row);
+}
+
+// ============================================================
+//  插入行
+// ============================================================
+
+void editor_insert_raw(EditorConfig *ec, int at, const char *s, size_t len)
+{
+    if (at < 0 || at > ec->doc.num_rows) return;
+    if (s == NULL) return;
+
+    ec->doc.row = editor_safe_realloc(ec->doc.row, (ec->doc.num_rows + 1) * sizeof(EditorRow));
+
+    if (at < ec->doc.num_rows)
+        memmove(&ec->doc.row[at + 1], &ec->doc.row[at],
+                sizeof(EditorRow) * (ec->doc.num_rows - at));
+
+    ec->doc.row[at].size = len;
+    ec->doc.row[at].chars = editor_safe_realloc(NULL, len + 1);
+    memcpy(ec->doc.row[at].chars, s, len);
+    ec->doc.row[at].chars[len] = '\0';
+
+    ec->doc.row[at].cell_count = 0;
+    ec->doc.row[at].cells = NULL;
+    ec->doc.row[at].highlight_open_comment = 0;
+
+    editor_update_row(ec, &ec->doc.row[at]);
+
+    ec->doc.num_rows++;
+    ec->doc.dirty++;
+}
+
+// ============================================================
+//  行内插入字符
+// ============================================================
+
+void editor_row_insert_char(EditorConfig *ec, EditorRow *row, int at, int c) {
+    if (at < 0 || at > row->size) at = row->size;
+
+    row->chars = editor_safe_realloc(row->chars, row->size + 2);
+    if (at < row->size)
+        memmove(&row->chars[at + 1], &row->chars[at], row->size - at + 1);
+    row->chars[at] = c;
+    row->size++;
+    row->chars[row->size] = '\0';
+
+    editor_update_row(ec, row);
+    ec->doc.dirty++;
+}
+
+// ============================================================
+//  插入字符（自动创建行）
+// ============================================================
+
+void editor_insert_char(EditorConfig *ec, int c) {
+    if (ec->view.cursor_y == ec->doc.num_rows)
+        editor_insert_raw(ec, ec->doc.num_rows, "", 0);
+    EditorRow *row = &ec->doc.row[ec->view.cursor_y];
+
+    //如果开启了覆盖模式，且光标没有越界，直接原地覆写
+    if (ec->ui.overwrite_mode && ec->view.cursor_x < row->size){
+        if ((c & 0xC0) != 0x80){
+            int old_len = utf8_step(&row->chars[ec->view.cursor_x], row->size - ec->view.cursor_x).bytes;
+
+            memmove(&row->chars[ec->view.cursor_x], &row->chars[ec->view.cursor_x + old_len], row->size - ec->view.cursor_x - old_len + 1);
+            row->size -= old_len;
+        }
+    }
+    editor_row_insert_char(ec,row,ec->view.cursor_x,c);
+    ec->view.cursor_x++;
+}
+
+// ============================================================
+//  Backspace
+// ============================================================
+
+void editor_delChar(EditorConfig *ec) {
+    if (ec->doc.num_rows == 0) return;
+    if (ec->view.cursor_y >= ec->doc.num_rows) return;
+
+    EditorRow *row = &ec->doc.row[ec->view.cursor_y];
+
+    if (ec->view.cursor_x > 0) {
+        ec->view.cursor_x = editor_row_del_char(ec, row, ec->view.cursor_x - 1);
+    } else if (ec->view.cursor_y > 0) {
+        /* 行首退格：当前行合并到上一行末尾 */
+        EditorRow *prev_row = &ec->doc.row[ec->view.cursor_y - 1];
+        int prev_len = prev_row->size;             // 合并前 prev_row 的长度
+
+        prev_row->chars = editor_safe_realloc(prev_row->chars,
+                              prev_len + row->size + 1);
+        memcpy(&prev_row->chars[prev_len], row->chars, row->size);
+        prev_row->chars[prev_len + row->size] = '\0';
+        prev_row->size = prev_len + row->size;
+
+        editor_update_row(ec, prev_row);
+
+        /* 释放当前行，下移后续行填补空缺 */
+        free(row->chars);
+        free(row->cells);
+
+        int remaining = ec->doc.num_rows - ec->view.cursor_y - 1;  // 当前行后的行数
+        if (remaining > 0)
+            memmove(&ec->doc.row[ec->view.cursor_y],
+                    &ec->doc.row[ec->view.cursor_y + 1],
+                    remaining * sizeof(EditorRow));
+        memset(&ec->doc.row[ec->doc.num_rows - 1], 0, sizeof(EditorRow));
+
+        ec->doc.num_rows--;
+        ec->view.cursor_y--;
+        ec->view.cursor_x = prev_len;                   // 光标落在合并后位置
+        ec->doc.dirty++;
+    }
+}
+
+int editor_row_del_char(EditorConfig *ec, EditorRow *row, int at){
+    if (at < 0 || at >= row->size) return ec->view.cursor_x;
+
+    int j = 0;
+    int start_at = 0;
+    int len = 0;
+    while (j <= at && j < row->size) {
+        start_at = j;
+        Utf8Step s = utf8_step(&row->chars[j], row->size - j);
+        len = s.bytes;
+        j += len;
+    }
+
+    memmove(&row->chars[start_at], &row->chars[start_at + len],
+            row->size - (start_at + len) + 1);
+    row->size -= len;
+
+    editor_update_row(ec, row);
+    ec->doc.dirty++;
+
+    return start_at;
+}
+
+// ============================================================
+//  Delete
+// ============================================================
+
+void editor_deleteCharAtCursor(EditorConfig *ec) {
+    if (ec->doc.num_rows == 0) return;
+    if (ec->view.cursor_y >= ec->doc.num_rows) return;
+
+    EditorRow *row = &ec->doc.row[ec->view.cursor_y];
+
+    if (ec->view.cursor_x < row->size) {
+        int char_len = utf8_step(&row->chars[ec->view.cursor_x], row->size - ec->view.cursor_x).bytes;
+        memmove(&row->chars[ec->view.cursor_x],
+                &row->chars[ec->view.cursor_x + char_len],
+                row->size - ec->view.cursor_x - char_len + 1);
+        row->size -= char_len;
+        editor_update_row(ec, row);
+        ec->doc.dirty++;
+    } else if (ec->view.cursor_y < ec->doc.num_rows - 1) {
+        /* 行尾删除：下一行合并到当前行末尾 */
+        EditorRow *next_row = &ec->doc.row[ec->view.cursor_y + 1];
+
+        row->chars = editor_safe_realloc(row->chars,
+                              row->size + next_row->size + 1);
+        memcpy(&row->chars[row->size], next_row->chars, next_row->size);
+        row->chars[row->size + next_row->size] = '\0';
+        row->size = row->size + next_row->size;
+        editor_update_row(ec, row);
+
+        free(next_row->chars);
+        free(next_row->cells);
+
+        int remaining = ec->doc.num_rows - ec->view.cursor_y - 2;  // next_row 后的行数
+        if (remaining > 0)
+            memmove(&ec->doc.row[ec->view.cursor_y + 1],
+                    &ec->doc.row[ec->view.cursor_y + 2],
+                    remaining * sizeof(EditorRow));
+        memset(&ec->doc.row[ec->doc.num_rows - 1], 0, sizeof(EditorRow));
+
+        ec->doc.num_rows--;
+        ec->doc.dirty++;
+    }
+}
+
+// ============================================================
+//  Enter（拆分行）
+// ============================================================
+
+void editor_insert_newline(EditorConfig *ec) {
+    if (ec->view.cursor_x == 0) {
+        /* 行首 Enter：在当前行上方插入空行 */
+        editor_insert_raw(ec, ec->view.cursor_y, "", 0);
+        if (ec->view.cursor_y < ec->doc.num_rows - 1)
+            ec->view.cursor_y++;
+    } else {
+        /* 行中 Enter：光标右侧拆成新行 */
+        EditorRow *row = &ec->doc.row[ec->view.cursor_y];
+        int new_size = row->size - ec->view.cursor_x;   // 拆出的新行长度
+
+        editor_insert_raw(ec, ec->view.cursor_y + 1,
+                         row->chars + ec->view.cursor_x, new_size);
+
+        row = &ec->doc.row[ec->view.cursor_y];               // insert_raw 可能 realloc，重新取指针
+        row->chars[ec->view.cursor_x] = '\0';
+        row->size = ec->view.cursor_x;
+        editor_update_row(ec, row);
+        ec->view.cursor_y++;
+    }
+    ec->view.cursor_x = 0;
+    ec->doc.dirty++;
+}
+
+// ============================================================
+//  状态消息
+// ============================================================
+
+void editor_set_status_message(EditorConfig *ec, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(ec->ui.statusmsg, sizeof(ec->ui.statusmsg), fmt, ap);
+    va_end(ap);
+    ec->ui.statusmsg_time = time(NULL);
+}
+
+// ============================================================
+//  提示输入（迷你 readline）
+// ============================================================
+
+char *editor_prompt(EditorConfig *ec, const char *prompt)
+{
+    size_t buf_size = 128;               // 初始缓冲区大小
+    char *buf = editor_safe_realloc(NULL, buf_size);
+    size_t buf_len = 0;                  // 当前输入长度
+    buf[0] = '\0';
+
+    while (1) {
+        editor_set_status_message(ec, prompt, buf);  // 把当前输入显示在消息栏
+        editor_refresh_screen(ec);
+        int c = terminal_read_key(ec);
+
+        if (c == KEY_BACKSPACE) {
+            if (buf_len != 0) {
+                int del_len = 1;
+                while (del_len < 4 && buf_len - del_len > 0
+                       && ((unsigned char)buf[buf_len - del_len] & 0xC0) == 0x80)
+                    del_len++;
+                buf_len -= del_len;
+                buf[buf_len] = '\0';
+            }
+        } else if (c == KEY_ESC) {
+            editor_set_status_message(ec, "");
+            free(buf);
+            return NULL;                 // ESC → 取消
+        } else if (c == '\r') {
+            if (buf_len != 0) {
+                editor_set_status_message(ec, "");
+                return buf;              // Enter → 返回输入
+            } else {
+                free(buf);
+                return NULL;             // 空输入视为取消
+            }
+        } else if (!iscntrl(c) && c < 256) {
+            if (buf_len == buf_size - 1) {
+                buf_size *= 2;
+                buf = editor_safe_realloc(buf, buf_size);
+            }
+            buf[buf_len++] = c;
+            buf[buf_len] = '\0';
+        }
+    }
+}
+
+// ============================================================
+//  搜索（环形搜索 + 高亮 state machine）
+// ============================================================
+
+/*
+ * editor_find: search-query state machine.
+ *
+ * On non-NULL query:
+ *   1. Store query in ec->ui.search_query (frees previous).
+ *   2. Broadcast editor_update_syntax() to every row — this
+ *      paints HL_MATCH on all occurrences in render-space.
+ *   3. Walk rows in a ring (starting from cursor_y) via strstr
+ *      on row->chars and jump to the first match.
+ *
+ * On NULL (ESC / empty Enter):
+ *   4. Free ec->ui.search_query and re-run syntax to clear HL_MATCH.
+ */
+void editor_find(EditorConfig *ec) {
+    char *query = editor_prompt(ec, "Search: %s (ESC to cancel)");
+
+    if (query == NULL) {
+        /* 取消搜索：清除高亮 */
+        if (ec->ui.search_query) {
+            free(ec->ui.search_query);
+            ec->ui.search_query = NULL;
+            for (int i = 0; i < ec->doc.num_rows; i++)
+                editor_update_syntax(ec, &ec->doc.row[i]);  // 重新扫描 → 清除 HL_MATCH
+        }
+        return;
+    }
+
+    /* 更新搜索词 */
+    if (ec->ui.search_query)
+        free(ec->ui.search_query);
+    ec->ui.search_query = query;
+
+    /* 全行广播：标记所有匹配为 HL_MATCH */
+    for (int i = 0; i < ec->doc.num_rows; i++)
+        editor_update_syntax(ec, &ec->doc.row[i]);
+
+    /* 1. 优先搜索当前行光标之后 */
+    EditorRow *cur = &ec->doc.row[ec->view.cursor_y];
+    char *match = strstr(cur->chars + ec->view.cursor_x, query);
+    if (match) {
+        ec->view.cursor_x = (int)(match - cur->chars);
+        ec->view.row_off = ec->view.cursor_y;
+    } else {
+        /* 2. 跨行环形搜索：从下一行开始，绕回当前行 */
+        int current = ec->view.cursor_y;
+        for (int i = 0; i < ec->doc.num_rows; i++) {
+            current += 1;
+            if (current >= ec->doc.num_rows) current = 0;
+            EditorRow *row = &ec->doc.row[current];
+            match = strstr(row->chars, query);
+            if (match) {
+                ec->view.cursor_y = current;
+                ec->view.cursor_x = (int)(match - row->chars);
+                ec->view.row_off = ec->view.cursor_y;
+                break;
+            }
+        }
+    }
+}
+
+// ============================================================
+//  查找下一个（Ctrl+G）
+// ============================================================
+
+void editor_find_next(EditorConfig *ec) {
+    if (ec->ui.search_query == NULL) {
+        editor_find(ec);
+        return;
+    }
+    if (ec->doc.num_rows == 0) return;
+
+    int qlen = strlen(ec->ui.search_query);
+    if (qlen == 0) return;
+
+    /* 同行搜索：从光标后找下一个匹配 */
+    EditorRow *cur = &ec->doc.row[ec->view.cursor_y];
+    if (ec->view.cursor_x + qlen <= cur->size) {
+        char *same_line = strstr(cur->chars + ec->view.cursor_x + qlen,
+                                  ec->ui.search_query);
+        if (same_line) {
+            ec->view.cursor_x = (int)(same_line - cur->chars);
+            return;
+        }
+    }
+
+    /* 跨行环形搜索 */
+    int start = ec->view.cursor_y;
+    for (int i = 1; i < ec->doc.num_rows; i++) {
+        int idx = (start + i) % ec->doc.num_rows;
+        EditorRow *row = &ec->doc.row[idx];
+        char *match = strstr(row->chars, ec->ui.search_query);
+        if (match) {
+            ec->view.cursor_y = idx;
+            ec->view.cursor_x = (int)(match - row->chars);
+            ec->view.row_off = ec->view.cursor_y;
+            if (idx <= start)
+                editor_set_status_message(ec, "Search wrapped around");
+            return;
+        }
+    }
+
+    editor_set_status_message(ec, "No more matches");
+}
+
+// ============================================================
+//  行号跳转（Ctrl+J）
+// ============================================================
+
+void editor_goto_line(EditorConfig *ec) {
+    char *query = editor_prompt(ec, "Go to line: %s (ESC to cancel)");
+    if (query == NULL) return;
+
+    int line = atoi(query);
+    free(query);
+
+    if (line < 1) line = 1;
+    if (line > ec->doc.num_rows) line = ec->doc.num_rows;
+
+    ec->view.cursor_y = line - 1;
+    ec->view.cursor_x = 0;
+    ec->view.row_off = ec->view.cursor_y;
+}
+
+============================================================
+FILE: src/fileio.c
+============================================================
+/*
+ * File I/O: open (read) and save (write) text files.
+ *
+ * editor_open reads a file line-by-line via fgetc, inserting each
+ * line through editor_insert_raw which triggers render + syntax.
+ * editor_save writes every row in order, separated by \n.
+ * Tab-less filename prompts Save As via editor_prompt.
+ */
+#include "common.h"
+#include "syntax.h"
+#include "editor.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// ============================================================
+//  保存
+// ============================================================
+
+void editor_save(EditorConfig *ec)
+{
+    if (ec->doc.filename == NULL) {
+        /* 未命名文件 → 弹出 Save As 提示 */
+        ec->doc.filename = editor_prompt(ec, "Save as: %s (ESC to cancel)");
+        if (ec->doc.filename == NULL) {
+            editor_set_status_message(ec, "Saved aborted");
+            return;
+        }
+        editor_select_syntax_highlight(ec);              // 后缀确定 → 启用语法高亮
+        for (int i = 0; i < ec->doc.num_rows; i++)
+            editor_update_row(ec, &ec->doc.row[i]);
+    }
+
+    FILE *fp = fopen(ec->doc.filename, "w");
+    if (fp == NULL) {
+        editor_set_status_message(ec, "Save failed! I/O error.");
+        return;
+    }
+
+    size_t total_written = 0;
+    for (int i = 0; i < ec->doc.num_rows; i++) {
+        if (ec->doc.row[i].size > 0)
+            total_written += fwrite(ec->doc.row[i].chars, 1, ec->doc.row[i].size, fp);
+        total_written += fwrite("\n", 1, 1, fp);
+    }
+    fclose(fp);
+
+    ec->doc.dirty = 0;
+    editor_set_status_message(ec, "Saved successfully! (%d bytes)", total_written);
+}
+
+// ============================================================
+//  打开
+// ============================================================
+
+void editor_open(EditorConfig *ec, const char *filename)
+{
+    if (ec->doc.filename) free(ec->doc.filename);
+    ec->doc.filename = editor_strdup(filename);
+
+    editor_select_syntax_highlight(ec);
+
+    FILE *fp = fopen(filename, "r");
+    if (!fp) return;
+
+    char *line = NULL;
+    size_t linecap = 0;
+    size_t len = 0;
+    int c;
+
+    while ((c = fgetc(fp)) != EOF) {
+        if (c == '\n') {
+            editor_insert_raw(ec, ec->doc.num_rows, line, len);
+            len = 0;
+        } else {
+            if (len >= linecap) {
+                linecap = (linecap == 0) ? 128 : linecap * 2;
+                line = editor_safe_realloc(line, linecap);
+            }
+            line[len] = (char)c;
+            len++;
+        }
+    }
+
+    if (len > 0)
+        editor_insert_raw(ec, ec->doc.num_rows, line, len);
+
+    free(line);
+    fclose(fp);
+    ec->doc.dirty = 0;
+}
+
+============================================================
+FILE: src/input.c
+============================================================
+/*
+ * Key dispatch: maps raw key codes to handler functions.
+ *
+ * g_key_bindings[] is a small LUT (key_code → void action(ec)).
+ * editor_process_key reads one key, walks the table, and falls
+ * through to printable-character insertion for 32..126.
+ *
+ * Wrappers like editor_insert_tab exist solely to match the
+ * dispatch signature (EditorConfig*) when the core function
+ * takes a raw char value.
+ */
+#include "common.h"
+#include "input.h"
+#include "editor.h"
+#include "terminal.h"
+#include "fileio.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+
+// ============================================================
+//  光标移动
+// ============================================================
+
+static void editor_cursor_move_up(EditorConfig *ec) {
+    if (ec->view.cursor_y > 0) {
+        EditorRow *cur_row = &ec->doc.row[ec->view.cursor_y];
+        int rx = editor_row_cx_to_rx(ec, cur_row, ec->view.cursor_x);
+        ec->view.cursor_y--;
+        ec->view.cursor_x = editor_row_rx_to_cx(ec, &ec->doc.row[ec->view.cursor_y], rx);
+    }
+}
+
+static void editor_cursor_move_down(EditorConfig *ec) {
+    if (ec->view.cursor_y < ec->doc.num_rows - 1) {
+        EditorRow *cur_row = &ec->doc.row[ec->view.cursor_y];
+        int rx = editor_row_cx_to_rx(ec, cur_row, ec->view.cursor_x);
+        ec->view.cursor_y++;
+        ec->view.cursor_x = editor_row_rx_to_cx(ec, &ec->doc.row[ec->view.cursor_y], rx);
+    }
+}
+
+static void editor_cursor_move_right(EditorConfig *ec) {
+    if (ec->view.cursor_y < ec->doc.num_rows) {
+        EditorRow *row = &ec->doc.row[ec->view.cursor_y];
+        if (ec->view.cursor_x < row->size) {
+            Utf8Step s = utf8_step(&row->chars[ec->view.cursor_x], row->size - ec->view.cursor_x);
+            ec->view.cursor_x += s.bytes;
+            if (ec->view.cursor_x > row->size) ec->view.cursor_x = row->size;
+        }
+    }
+}
+
+static void editor_cursor_move_left(EditorConfig *ec) {
+    if (ec->view.cursor_x > 0) {
+        EditorRow *row = &ec->doc.row[ec->view.cursor_y];
+        int j = 0;
+        int prev_start = 0;
+        while (j < ec->view.cursor_x && j < row->size) {
+            prev_start = j;
+            Utf8Step s = utf8_step(&row->chars[j], row->size - j);
+            j += s.bytes;
+        }
+        ec->view.cursor_x = prev_start;
+    } else if (ec->view.cursor_y > 0) {
+        ec->view.cursor_y--;
+        ec->view.cursor_x = ec->doc.row[ec->view.cursor_y].size;
+    }
+}
+
+// ============================================================
+//  退出
+// ============================================================
+
+static void editor_quit(EditorConfig *ec) {
+    disable_raw_mode(ec);
+    DWORD written;
+    WriteFile(ec->term.hOUT, "\x1b[?1049l", 8, &written, NULL);  // 退出备用屏幕缓冲区
+    printf("\x1b[2J");                                         // 清屏
+    printf("\x1b[H");                                          // 光标归位
+    exit(0);
+}
+
+// ============================================================
+//  Tab 插入（dispatch 适配层）
+// ============================================================
+
+static void editor_insert_tab(EditorConfig *ec) {
+    editor_insert_char(ec, '\t');
+}
+
+// ============================================================
+//  Insert 切换（覆盖/插入模式）
+// ============================================================
+
+static void editor_toggle_overwrite(EditorConfig *ec) {
+    ec->ui.overwrite_mode = !ec->ui.overwrite_mode;
+    editor_set_status_message(ec, ec->ui.overwrite_mode
+                              ? "Overwrite mode"
+                              : "Insert mode");
+}
+
+static void editor_quick_open(EditorConfig *ec){
+    if (ec->doc.dirty > 0){
+        editor_set_status_message(ec,"WARNING: Unsaved changes! Save with Ctrl+S first.");
+        return;
+    }
+
+    char *new_filename = editor_prompt(ec,"Quick Open: %s (ESC to cancel)");
+    if (new_filename == NULL){
+        editor_set_status_message(ec,"WARNING: No filename provided,Open aborted");
+        return;
+    }
+
+    editor_free_all_row(ec);
+
+    ec->view.cursor_x = 0;
+    ec->view.cursor_y = 0;
+    ec->view.col_off = 0;
+    ec->view.row_off = 0;
+    ec->ui.overwrite_mode = 0;
+
+    editor_open(ec,new_filename);
+    free(new_filename);
+
+    editor_set_status_message(ec,"Open complete! Successfully loaded file.");
+}
+
+// ============================================================
+//  按键绑定表
+// ============================================================
+
+typedef struct {
+    int key_code;
+    void (*action)(EditorConfig *);
+} KeyBinding;
+
+static const KeyBinding g_key_bindings[] = {
+    {KEY_ARROW_UP,    editor_cursor_move_up},
+    {KEY_ARROW_DOWN,  editor_cursor_move_down},
+    {KEY_ARROW_LEFT,  editor_cursor_move_left},
+    {KEY_ARROW_RIGHT, editor_cursor_move_right},
+    {KEY_CTRL_Q,      editor_quit},
+    {KEY_CTRL_S,      editor_save},
+    {KEY_ENTER,       editor_insert_newline},
+    {KEY_BACKSPACE,   editor_delChar},
+    {KEY_TAB,         editor_insert_tab},
+    {KEY_DEL,         editor_deleteCharAtCursor},
+    {KEY_CTRL_F,      editor_find},
+    {KEY_CTRL_G,      editor_find_next},
+    {KEY_INS,         editor_toggle_overwrite},
+    {KEY_CTRL_P,editor_quick_open},
+    {KEY_CTRL_J,editor_goto_line}
+};
+
+static const int g_bindings_count = sizeof(g_key_bindings) / sizeof(g_key_bindings[0]);
+
+// ============================================================
+//  按键分发
+// ============================================================
+
+void editor_process_key(EditorConfig *ec) {
+    int c = terminal_read_key(ec);
+
+    for (int i = 0; i < g_bindings_count; i++) {
+        if (g_key_bindings[i].key_code == c) {
+            g_key_bindings[i].action(ec);
+            return;
+        }
+    }
+
+    if (c >= 32 && c <= 255)
+        editor_insert_char(ec, c);
+}
+
+============================================================
+FILE: src/render.c
+============================================================
+/*
+ * Screen rendering: builds an AppendBuffer of ANSI escape sequences
+ * and text, then flushes it to the console in one WriteFile call.
+ *
+ * Draw order (top to bottom):
+ *   editor_draw_rows      — text lines with line numbers + color
+ *   editor_draw_status_bar — file name / row count / cursor position
+ *   editor_draw_message_bar — ephemeral status messages (5 s timeout)
+ *
+ * Horizontal scrolling uses render-space coordinates: col_off is a
+ * visual-column offset into the cells[] array (tabs already expanded),
+ * so the display loop simply iterates cells without any live
+ * tab expansion.
+ */
+#include "common.h"
+#include "render.h"
+#include "editor.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <time.h>
+#include <Windows.h>
+
+// ============================================================
+//  追加缓冲区
+// ============================================================
+
+static void abuf_append(AppendBuffer *ab, const char *s, int len)
+{
+    char *new_ptr = editor_safe_realloc(ab->b, ab->len + len); // 扩容
+    memcpy(new_ptr + ab->len, s, len);
+    ab->b = new_ptr;
+    ab->len += len;
+}
+
+static void abuf_free(AppendBuffer *ab)
+{
+    free(ab->b);
+}
+
+// ============================================================
+//  语法高亮 → ANSI 颜色
+// ============================================================
+
+static int editor_syntax_to_color(int hl)
+{
+    switch (hl) {
+    case HL_COMMENT:    return 36;  // 青色
+    case HL_ML_COMMENT: return 36;  // 青色（多行注释）
+    case HL_KEYWORD1: return 33;  // 黄色（类型关键字）
+    case HL_KEYWORD2: return 32;  // 绿色（控制流关键字）
+    case HL_STRING:   return 35;  // 品红
+    case HL_NUMBER:   return 31;  // 红色
+    case HL_MATCH:    return 34;  // 蓝色（搜索匹配）
+    default:          return 37;  // 白色
+    }
+}
+
+// ============================================================
+//  视口滚动
+// ============================================================
+
+static void editor_scroll(EditorConfig *ec)
+{
+    /* 垂直滚动：确保光标在可见区内 */
+    if (ec->view.cursor_y < ec->view.row_off)
+        ec->view.row_off = ec->view.cursor_y;
+    if (ec->view.cursor_y >= ec->view.row_off + ec->view.screen_rows - 2)
+        ec->view.row_off = ec->view.cursor_y - (ec->view.screen_rows - 2) + 1;
+
+    /* 水平滚动：光标 render-space 位置 → col_off */
+    int rx = 0;                               // 光标在 render-space 的列
+    if (ec->view.cursor_y < ec->doc.num_rows)
+        rx = editor_row_cx_to_rx(ec, &ec->doc.row[ec->view.cursor_y], ec->view.cursor_x);
+
+    if (rx < ec->view.col_off)                     // 光标出了左边界
+        ec->view.col_off = rx;
+    if (rx >= ec->view.col_off + ec->view.screen_cols - ec->view.gutter_width - 1)  // 光标超出右边界
+        ec->view.col_off = rx - (ec->view.screen_cols - ec->view.gutter_width - 1) + 1;
+    if (ec->view.col_off < 0) ec->view.col_off = 0;
+}
+
+// ============================================================
+//  文本行绘制
+// ============================================================
+
+static void editor_draw_rows(AppendBuffer *ab, EditorConfig *ec)
+{
+    for (int y = 0; y < ec->view.screen_rows - 2; y++) {
+        int filerow = y + ec->view.row_off;           // 文件中实际的行号
+
+        abuf_append(ab, "\x1b[K", 3);            // 清空本行
+
+        char ln_buf[32];
+        int ln_len;
+        if (filerow < ec->doc.num_rows) {
+            /* 行号（青色） */
+            ln_len = snprintf(ln_buf, sizeof(ln_buf), "\x1b[36m%*d \x1b[39m",
+                              ec->view.gutter_width, filerow + 1);
+            abuf_append(ab, ln_buf, ln_len);
+
+            int available_cols = ec->view.screen_cols - ec->view.gutter_width - 1;
+
+            /* Walk cells[] by visual columns: map col_off → cell index,
+             * then measure how many cells fit within available_cols. */
+            int cell_start = 0;
+            int current_rx = 0;
+            while (cell_start < ec->doc.row[filerow].cell_count && current_rx < ec->view.col_off) {
+                current_rx += ec->doc.row[filerow].cells[cell_start].display_width;
+                cell_start++;
+            }
+
+            int cell_n = 0;
+            int printed_rx = 0;
+            while (cell_start + cell_n < ec->doc.row[filerow].cell_count) {
+                int w = ec->doc.row[filerow].cells[cell_start + cell_n].display_width;
+                if (printed_rx + w > available_cols) break;
+                printed_rx += w;
+                cell_n++;
+            }
+
+            int current_color = -1;
+            for (int i = 0; i < cell_n; i++) {
+                RenderCell *cell = &ec->doc.row[filerow].cells[cell_start + i];
+                unsigned char hl = cell->hl;
+
+                if (hl == HL_NORMAL) {
+                    if (current_color != -1) {
+                        abuf_append(ab, "\x1b[39m", 5);
+                        current_color = -1;
+                    }
+                } else {
+                    int color = editor_syntax_to_color(hl);
+                    if (color != current_color) {
+                        char buf[16];
+                        int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", color);
+                        abuf_append(ab, buf, clen);
+                        current_color = color;
+                    }
+                }
+
+                char encoded[5];
+                int elen = utf8_encode(cell->codepoint, encoded);
+                abuf_append(ab, encoded, elen);
+            }
+            abuf_append(ab, "\x1b[39m", 5);
+        } else {
+            ln_len = snprintf(ln_buf, sizeof(ln_buf), "\x1b[36m%*s \x1b[39m",
+                              ec->view.gutter_width, "~");
+            abuf_append(ab, ln_buf, ln_len);       // 空白行显示波浪号
+        }
+
+        abuf_append(ab, "\r\n", 2);
+    }
+}
+
+// ============================================================
+//  状态栏
+// ============================================================
+
+static void editor_draw_status_bar(AppendBuffer *ab, EditorConfig *ec)
+{
+    abuf_append(ab, "\x1b[7m", 4);               // 反白
+    char status[80], rstatus[80];
+
+    const char *display_name = ec->doc.filename ? ec->doc.filename : "[No Name]";
+    const char *line_label = (ec->doc.num_rows == 1) ? "line" : "lines";
+    const char *dirty_marker = ec->doc.dirty ? "(modified)" : "";
+    int len = snprintf(status, sizeof(status), "%.20s - %d %s %s",
+                       display_name, ec->doc.num_rows, line_label, dirty_marker);
+
+    int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d",
+                        ec->view.cursor_y + 1, ec->doc.num_rows);
+    if (len > ec->view.screen_cols) len = ec->view.screen_cols;
+
+    abuf_append(ab, status, len);
+
+    /* 左对齐文件名，右对齐行号 */
+    while (len < ec->view.screen_cols) {
+        if (ec->view.screen_cols - len == rlen) {     // 刚好够放 rstatus
+            abuf_append(ab, rstatus, rlen);
+            break;
+        }
+        abuf_append(ab, " ", 1);
+        len++;
+    }
+
+    abuf_append(ab, "\x1b[m", 3);                // 复位属性
+    abuf_append(ab, "\r\n", 2);
+}
+
+// ============================================================
+//  消息栏
+// ============================================================
+
+void editor_draw_message_bar(AppendBuffer *ab, EditorConfig *ec)
+{
+    abuf_append(ab, "\x1b[K", 3);                // 清空本行
+    int msglen = strlen(ec->ui.statusmsg);
+    if (msglen > ec->view.screen_cols) msglen = ec->view.screen_cols;
+
+    if (msglen > 0 && time(NULL) - ec->ui.statusmsg_time < 5)  // 5 秒超时
+        abuf_append(ab, ec->ui.statusmsg, msglen);
+}
+
+// ============================================================
+//  全屏刷新（每帧入口）
+// ============================================================
+
+void editor_refresh_screen(EditorConfig *ec)
+{
+    /* 计算行号栏宽度：至少 4 位 */
+    int max_lines = ec->doc.num_rows > 0 ? ec->doc.num_rows : 1;
+    int digits = 1;
+    while (max_lines >= 10) {
+        digits++;
+        max_lines /= 10;
+    }
+    if (digits < 4)
+        digits = 4;
+    ec->view.gutter_width = digits + 1;               // 数字 + 1 空格
+
+    editor_scroll(ec);
+
+    AppendBuffer ab = ABUF_INIT;
+    abuf_append(&ab, "\x1b[?25l", 6);            // 隐藏光标
+    abuf_append(&ab, "\x1b[H", 3);               // 光标归位 (1,1)
+
+    editor_draw_rows(&ab, ec);                   // 文本行
+    editor_draw_status_bar(&ab, ec);              // 状态栏
+    editor_draw_message_bar(&ab, ec);             // 消息栏
+
+    /* 光标定位：屏幕坐标 = (cursor_y - row_off + 1, rx - col_off + gutter + 2) */
+    int rx = 0;                                  // render-space 光标列
+    if (ec->view.cursor_y < ec->doc.num_rows)
+        rx = editor_row_cx_to_rx(ec, &ec->doc.row[ec->view.cursor_y], ec->view.cursor_x);
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
+             (ec->view.cursor_y - ec->view.row_off) + 1,
+             (rx - ec->view.col_off) + ec->view.gutter_width + 2);
+    abuf_append(&ab, buf, strlen(buf));
+
+    abuf_append(&ab, "\x1b[?25h", 6);            // 显示光标
+
+    DWORD bytes_written;
+    WriteFile(ec->term.hOUT, ab.b, ab.len, &bytes_written, NULL);
+    abuf_free(&ab);
+}
+
+============================================================
+FILE: src/syntax.c
+============================================================
+/*
+ * Syntax highlighting engine (keyword + comment + search match).
+ *
+ * g_high_light_data_base[] defines rules for each language.
+ * editor_select_syntax_highlight() picks the right entry by
+ * filename suffix and sets ec->settings.tab_stop accordingly.
+ *
+ * editor_update_syntax() annotates row->cells[].hl with colour tags
+ * by scanning the cell array:
+ *   1. Multiline comments (slash-star ... star-slash) are handled via
+ *      a state machine that inherits highlight_open_comment from the
+ *      previous row, with recursive re-highlight on state change.
+ *   2. Single-line comments (//, #) are detected once and the rest
+ *      of the line is filled with HL_COMMENT.
+ *   3. Keywords are matched at word boundaries via strncmp.
+ *      Trailing '|' in the keyword table marks type keywords -> HL_KEYWORD2.
+ *   4. Active search terms (ec->ui.search_query) are highlighted last
+ *      via strstr, potentially overriding keyword colours.
+ */
+#include <ctype.h>
+#include <string.h>
+#include "syntax.h"
+
+// ==========================================
+// 1. C / C++
+// ==========================================
+static char *c_extensions[] = { ".c", ".h", ".cpp", ".hpp", ".cc", NULL };
+static char *c_keywords[] = {
+    "switch", "if", "while", "for", "break", "continue", "return", "else",
+    "struct", "union", "typedef", "static", "enum", "class", "case",
+    "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
+    "void|", "bool|", NULL
+};
+
+// ==========================================
+// 2. Python
+// ==========================================
+static char *python_extensions[] = { ".py", NULL };
+static char *python_keywords[] = {
+    "and", "as", "assert", "break", "class", "continue", "def", "del",
+    "elif", "else", "except", "finally", "for", "from", "global", "if",
+    "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass",
+    "raise", "return", "try", "while", "with", "yield", "async", "await",
+    "False|", "True|", "None|", "int|", "float|", "str|", "bool|", "list|",
+    "dict|", "set|", "tuple|", NULL
+};
+
+// ==========================================
+// 3. Rust
+// ==========================================
+static char *rust_extensions[] = { ".rs", NULL };
+static char *rust_keywords[] = {
+    "as", "break", "const", "continue", "crate", "else", "enum", "extern",
+    "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
+    "mut", "pub", "ref", "return", "self", "Self", "static", "struct",
+    "super", "trait", "type", "unsafe", "use", "where", "while", "async", "await",
+    "true|", "false|", "i8|", "i16|", "i32|", "i64|", "u8|", "u16|", "u32|",
+    "u64|", "f32|", "f64|", "usize|", "isize|", "bool|", "char|", "str|", "String|", NULL
+};
+
+// ==========================================
+// 4. Go
+// ==========================================
+static char *go_extensions[] = { ".go", NULL };
+static char *go_keywords[] = {
+    "break", "default", "func", "interface", "select", "case", "defer",
+    "go", "map", "struct", "chan", "else", "goto", "package", "switch",
+    "const", "fallthrough", "if", "range", "type", "continue", "for",
+    "import", "return", "var",
+    "true|", "false|", "nil|", "iota|", "bool|", "byte|", "complex64|",
+    "complex128|", "error|", "float32|", "float64|", "int|", "int8|",
+    "int16|", "int32|", "int64|", "rune|", "string|", "uint|", "uint8|",
+    "uint16|", "uint32|", "uint64|", "uintptr|", NULL
+};
+
+// ==========================================
+// 5. JavaScript / TypeScript
+// ==========================================
+static char *js_extensions[] = { ".js", ".ts", NULL };
+static char *js_keywords[] = {
+    "break", "case", "catch", "class", "const", "continue", "debugger",
+    "default", "delete", "do", "else", "export", "extends", "finally",
+    "for", "function", "if", "import", "in", "instanceof", "new", "return",
+    "super", "switch", "this", "throw", "try", "typeof", "var", "void",
+    "while", "with", "yield", "let", "await", "async",
+    "true|", "false|", "null|", "undefined|", "NaN|", "Infinity|", NULL
+};
+
+// ============================================================
+//  高亮数据库
+// ============================================================
+
+struct EditorSyntax g_high_light_data_base[] = {
+    {
+        c_extensions,
+        c_keywords,
+        "//", "/*", "*/",
+        HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
+        4
+    },
+    {
+        python_extensions,
+        python_keywords,
+        "#", "\"\"\"", "\"\"\"",
+        HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
+        4
+    },
+    {
+        rust_extensions,
+        rust_keywords,
+        "//", "/*", "*/",
+        HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
+        4
+    },
+    {
+        go_extensions,
+        go_keywords,
+        "//", "/*", "*/",
+        HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
+        8
+    },
+    {
+        js_extensions,
+        js_keywords,
+        "//", "/*", "*/",
+        HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
+        2
+    }
+};
+
+const int g_high_light_data_base_entries =
+    sizeof(g_high_light_data_base) / sizeof(g_high_light_data_base[0]);
+
+// ============================================================
+//  语法高亮更新
+// ============================================================
+
+static int cell_is_sep(uint32_t cp) {
+    if (cp > 127) return 0;
+    return isspace((int)cp) || strchr(",.()+-/*=~%<>[];", (int)cp) != NULL;
+}
+
+static int cell_match_seq(RenderCell *cells, int start, int count, const char *seq, int seq_len) {
+    if (start + seq_len > count) return 0;
+    for (int k = 0; k < seq_len; k++)
+        if (cells[start + k].codepoint != (unsigned char)seq[k]) return 0;
+    return 1;
+}
+
+void editor_update_syntax(EditorConfig *ec, EditorRow *start_row) {
+    int current_idx = start_row - ec->doc.row;
+
+    while (current_idx < ec->doc.num_rows) {
+        EditorRow *row = &ec->doc.row[current_idx];
+
+        int in_comment = (current_idx > 0 && ec->doc.row[current_idx - 1].highlight_open_comment);
+
+        if (row->cell_count == 0) {
+            int changed = (row->highlight_open_comment != in_comment);
+            row->highlight_open_comment = in_comment;
+            if (!changed) break;
+            current_idx++;
+            continue;
+        }
+
+        for (int i = 0; i < row->cell_count; i++)
+            row->cells[i].hl = HL_NORMAL;
+
+        if (ec->settings.syntax != NULL) {
+            char **keywords = ec->settings.syntax->keywords;
+            char *scs = ec->settings.syntax->single_line_comment_start;
+            char *mcs = ec->settings.syntax->multiline_comment_start;
+            char *mce = ec->settings.syntax->multiline_comment_end;
+
+            int scs_len = scs ? strlen(scs) : 0;
+            int mcs_len = mcs ? strlen(mcs) : 0;
+            int mce_len = mce ? strlen(mce) : 0;
+
+            int prev_sep = 1;
+            int i = 0;
+
+            while (i < row->cell_count) {
+                uint32_t cp = row->cells[i].codepoint;
+
+                /* 多行注释状态机 */
+                if (mcs_len && mce_len) {
+                    if (in_comment) {
+                        row->cells[i].hl = HL_ML_COMMENT;
+                        if (cell_match_seq(row->cells, i, row->cell_count, mce, mce_len)) {
+                            for (int k = 0; k < mce_len; k++)
+                                row->cells[i + k].hl = HL_ML_COMMENT;
+                            i += mce_len;
+                            in_comment = 0;
+                            prev_sep = 1;
+                            continue;
+                        }
+                        i++;
+                        continue;
+                    } else if (cell_match_seq(row->cells, i, row->cell_count, mcs, mcs_len)) {
+                        for (int k = 0; k < mcs_len; k++)
+                            row->cells[i + k].hl = HL_ML_COMMENT;
+                        i += mcs_len;
+                        in_comment = 1;
+                        continue;
+                    }
+                }
+
+                /* 单行注释检测 */
+                if (scs_len && cell_match_seq(row->cells, i, row->cell_count, scs, scs_len)) {
+                    for (int k = i; k < row->cell_count; k++)
+                        row->cells[k].hl = HL_COMMENT;
+                    break;
+                }
+
+                /* 词边界 → 匹配关键字 */
+                if (prev_sep && cp < 128) {
+                    int keyword_match = 0;
+                    for (int j = 0; keywords[j]; j++) {
+                        int klen = strlen(keywords[j]);
+                        int kw2 = keywords[j][klen - 1] == '|';
+                        if (kw2) klen--;
+                        if (i + klen > row->cell_count) continue;
+
+                        int match = 1;
+                        for (int k = 0; k < klen; k++) {
+                            if (row->cells[i + k].codepoint != (unsigned char)keywords[j][k]) {
+                                match = 0; break;
+                            }
+                        }
+                        if (match && (i + klen == row->cell_count ||
+                                      cell_is_sep(row->cells[i + klen].codepoint))) {
+                            for (int k = 0; k < klen; k++)
+                                row->cells[i + k].hl = kw2 ? HL_KEYWORD2 : HL_KEYWORD1;
+                            i += klen;
+                            keyword_match = 1;
+                            break;
+                        }
+                    }
+                    if (keyword_match) { prev_sep = 0; continue; }
+                }
+                prev_sep = cell_is_sep(cp);
+                i++;
+            }
+        } // end if (ec->settings.syntax != NULL)
+
+        /* 搜索匹配高亮 */
+        if (ec->ui.search_query != NULL) {
+            int query_len = strlen(ec->ui.search_query);
+            if (query_len > 0 && query_len <= row->cell_count) {
+                for (int i = 0; i <= row->cell_count - query_len; i++) {
+                    int match = 1;
+                    for (int k = 0; k < query_len; k++) {
+                        if (row->cells[i + k].codepoint != (unsigned char)ec->ui.search_query[k]) {
+                            match = 0; break;
+                        }
+                    }
+                    if (match) {
+                        for (int k = 0; k < query_len; k++)
+                            row->cells[i + k].hl = HL_MATCH;
+                        i += query_len - 1;
+                    }
+                }
+            }
+        }
+
+        int changed = (row->highlight_open_comment != in_comment);
+        row->highlight_open_comment = in_comment;
+        if (!changed) break;
+
+        current_idx++;
+    }
+}
+
+// ============================================================
+//  语法嗅探
+// ============================================================
+
+void editor_select_syntax_highlight(EditorConfig *ec) {
+    ec->settings.syntax = NULL;
+    ec->settings.tab_stop = EDITOR_TAB_STOP;
+    if (ec->doc.filename == NULL) return;
+
+    char *ext = strrchr(ec->doc.filename, '.');
+
+    for (int j = 0; j < g_high_light_data_base_entries; j++) {
+        struct EditorSyntax *s = &g_high_light_data_base[j];
+        int i = 0;
+        while (s->file_match[i]) {
+            int is_ext = (s->file_match[i][0] == '.');
+            if ((is_ext && ext && !strcmp(ext, s->file_match[i])) ||
+                (!is_ext && strstr(ec->doc.filename, s->file_match[i]))) {
+                ec->settings.syntax = s;
+                ec->settings.tab_stop = s->tab_stop;
+                return;
+            }
+            i++;
+        }
+    }
+}
+
+============================================================
+FILE: src/terminal.c
+============================================================
+/*
+ * Terminal raw mode and VT escape-sequence input.
+ *
+ * enable_raw_mode/disable_raw_mode toggle the Win32 console
+ * flags so that every keystroke is delivered immediately
+ * (no line buffering, no echo) and ANSI/VT input sequences
+ * are recognised.
+ *
+ * terminal_read_key blocks for one keystroke.  When the byte
+ * is \x1b (ESC) it attempts to read the continuation bytes
+ * within a 100 ms window and looks them up in g_esc_mappings[]
+ * to recognise cursor keys, Home/End, Delete, Page Up/Down.
+ * If the continuation times out, the key is reported as ESC.
+ */
+#include "terminal.h"
+#include "common.h"
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+// ============================================================
+//  原始模式
+// ============================================================
+
+void disable_raw_mode(EditorConfig *ec) {
+    if (ec->term.raw_mode) {
+        SetConsoleMode(ec->term.hIN, ec->term.dwOriginalInMode);
+        SetConsoleMode(ec->term.hOUT, ec->term.dwOriginalOutMode);
+        SetConsoleOutputCP(ec->term.uOriginalOutputCP);
+        SetConsoleCP(ec->term.uOriginalInputCP);
+        ec->term.raw_mode = 0;
+    }
+}
+
+void enable_raw_mode(EditorConfig *ec) {
+    ec->term.hIN = GetStdHandle(STD_INPUT_HANDLE);
+    ec->term.hOUT = GetStdHandle(STD_OUTPUT_HANDLE);
+
+    /* Switch console I/O to UTF-8 so multi-byte characters survive the
+     * code-page round-trip. Save originals to restore on quit. */
+    ec->term.uOriginalOutputCP = GetConsoleOutputCP();
+    ec->term.uOriginalInputCP  = GetConsoleCP();
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+
+    if (!GetConsoleMode(ec->term.hIN, &ec->term.dwOriginalInMode)) return;
+    if (!GetConsoleMode(ec->term.hOUT, &ec->term.dwOriginalOutMode)) return;
+
+    DWORD raw_in = ec->term.dwOriginalInMode;
+    raw_in &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT);
+    raw_in |= ENABLE_WINDOW_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT;
+    SetConsoleMode(ec->term.hIN, raw_in);
+
+    DWORD raw_out = ec->term.dwOriginalOutMode;
+    raw_out |= ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN;
+    SetConsoleMode(ec->term.hOUT, raw_out);
+
+    ec->term.raw_mode = 1;
+}
+
+// ============================================================
+//  窗口尺寸
+// ============================================================
+
+int terminal_get_window_size(EditorConfig *ec, int *rows, int *cols) {
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    if (!GetConsoleScreenBufferInfo(ec->term.hOUT, &csbi))
+        return -1;
+
+    *cols = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+    *rows = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+    return 0;
+}
+
+// ============================================================
+//  转义序列 → 键码
+// ============================================================
+
+/*
+ * VT escape sequence → EditorKey lookup.
+ *
+ * After receiving \x1b the driver reads up to 3 continuation
+ * bytes.  The lookup string omits the leading \x1b; e.g.
+ * "\x1b[A" (cursor up) is stored as "[A".
+ */
+typedef struct {
+    const char *seq;
+    int key_code;
+} EscSeqMapping;
+
+static const EscSeqMapping g_esc_mappings[] = {
+    {"[A",  KEY_ARROW_UP},
+    {"[B",  KEY_ARROW_DOWN},
+    {"[C",  KEY_ARROW_RIGHT},
+    {"[D",  KEY_ARROW_LEFT},
+    {"[H",  KEY_HOME},
+    {"[F",  KEY_END},
+    {"[1~", KEY_HOME},
+    {"[2~", KEY_INS},
+    {"[3~", KEY_DEL},
+    {"[4~", KEY_END},
+    {"[5~", KEY_PAGE_UP},
+    {"[6~", KEY_PAGE_DOWN},
+    {"[7~", KEY_HOME},
+    {"[8~", KEY_END},
+    {"OH",  KEY_HOME},
+    {"OF",  KEY_END}
+};
+
+static const int g_esc_count = sizeof(g_esc_mappings) / sizeof(g_esc_mappings[0]);
+
+/*
+ * Read one byte with a 100 ms timeout.
+ * Returns 1 on success, 0 on timeout.
+ */
+static int terminal_read_char_timeout(EditorConfig *ec, char *c)
+{
+    if (WaitForSingleObject(ec->term.hIN, 100) == WAIT_OBJECT_0) {
+        DWORD bytes_read;
+        if (ReadFile(ec->term.hIN, c, 1, &bytes_read, NULL) && bytes_read == 1)
+            return 1;
+    }
+    return 0;
+}
+
+// ============================================================
+//  核心按键读取
+// ============================================================
+
+int terminal_read_key(EditorConfig *ec) {
+    DWORD bytes_read;
+    unsigned char c = '\0';
+
+    /* 阻塞读取一个字节 */
+    while (ReadFile(ec->term.hIN, &c, 1, &bytes_read, NULL)) {
+        if (bytes_read == 1) break;
+    }
+
+    if (c == '\x1b') {
+        char seq[8] = {0};                 // 后缀字节（不含前导 \x1b）
+
+        if (!terminal_read_char_timeout(ec, &seq[0])) return KEY_ESC;
+        if (!terminal_read_char_timeout(ec, &seq[1])) return KEY_ESC;
+
+        if (seq[0] == '[' && seq[1] >= '0' && seq[1] <= '9')  // \x1b[5~ 等 3 字节序列
+            if (!terminal_read_char_timeout(ec, &seq[2])) return KEY_ESC;
+
+        for (int i = 0; i < g_esc_count; i++) {
+            if (strcmp(seq, g_esc_mappings[i].seq) == 0)
+                return g_esc_mappings[i].key_code;
+        }
+        return KEY_ESC;                    // 未知序列 → 当作 ESC
+    }
+
+    return c;                              // 普通字符 / Ctrl 键
+}
+
+============================================================
+FILE: CMakeLists.txt
+============================================================
+cmake_minimum_required(VERSION 3.10)
+project(TextEditor C)
+
+set(CMAKE_C_STANDARD 99)
+
+# 包含头文件目录
+include_directories(include)
+
+# 源文件列表
+set(SOURCES
+        src/Main/main.c
+        src/terminal.c
+        src/render.c
+        src/editor.c
+        src/input.c
+        src/fileio.c
+        src/syntax.c
+        src/common.c
+)
+
+# 头文件列表（在某些 IDE 如 Visual Studio 中显示用）
+set(HEADERS
+        include/common.h
+        include/render.h
+        include/terminal.h
+        include/input.h
+        include/editor.h
+        include/fileio.h
+        include/syntax.h
+)
+
+add_executable(TextEditor ${SOURCES} ${HEADERS})
+
+# 如果是 Windows，链接kernel32
+if(WIN32)
+    target_link_libraries(TextEditor kernel32)
+endif()
+=== GIT LOG (last 10) ===
+8d6f7d8 Fix Chinese garbled text: switch console to UTF-8 codepage
+dc6c68c Architecture upgrade: UTF-8 decode layer + RenderCell migration
+a43071c Fix code review issues: cursor off-by-one, UTF-8 render boundaries, recursive stack, overwrite mode
+87ba47c Keep fix.log tracked despite *.log gitignore rule
+70d5b15 Update editor core: UTF-8 support, overwrite mode, quick open, find next, multi-line comments
+5f32d23 Clean repository: remove build artifacts, IDE config, personal notes, temp files
+22e545b Ignore .claude directory
+f01dde3 ...
+9a9d99d VERSION_0.1

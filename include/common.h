@@ -52,6 +52,24 @@ typedef enum {
     HL_HIGHLIGHT_NUMBERS = (1 << 1)
 } HighlightFlag;
 
+typedef enum {
+    OP_INSERT_CHARS,    // 插入字符（打字、粘贴）
+    OP_DELETE_CHARS,    // 删除字符（Backspace, Delete）
+    OP_INSERT_LINE,     // 换行（Enter键）
+    OP_DELETE_LINE,     // 删除行（在行首按Backspace合并行）
+}OpType;
+
+typedef struct {
+    OpType type;
+    int cursor_y;     // 操作发生时的行号
+    int cursor_x;     // 操作发生时的列号（chars 空间的字节索引）
+    char *text;       // 插入或删除的具体文本
+    int text_len;     // 文本字节数
+    time_t timestamp; // 用于合并连续输入的防抖时间戳
+} UndoRecord;
+
+#define UNDO_INIT_CAP 64
+
 /*
  * Syntax rule table for one programming language.
  *
@@ -90,67 +108,69 @@ typedef struct {
     int cell_count;             // cells 数组长度
     RenderCell *cells;          // 渲染单元数组（\t 展开为空格 cell，byte_len=0）
     int highlight_open_comment; // 上行是否有未闭合多行注释
+    size_t syntax_hash;         // chars[] 内容指纹 — 增量语法跳过未变更行
 } EditorRow;
 
 // ============================================================
-//  编辑器状态
+//  子状态 — 按关注点拆分
 // ============================================================
 
-/*
- * Root state threaded through every function (no globals).
- *
- * Coordinates use two domains:
- *   cursor_x/y   — chars-space (logical, \t = 1 byte)
- *   col_off      — render-space (physical, \t = tab_stop columns)
- *   row_off      — first visible row index
- *
- * Conversions: editor_row_cx_to_rx(cursor_x) → render-space column.
- *
- * Syntax highlighting auto-detects from filename via
- * editor_select_syntax_highlight() and sets tab_stop accordingly.
- */
+// 视图状态 — 光标位置、滚动偏移、屏幕尺寸
 typedef struct {
-    /* ---- 光标 ---- */
-    int cursor_x, cursor_y;      // chars-space 光标位置
+    int cursor_x, cursor_y;
+    int row_off, col_off;
+    int screen_rows, screen_cols;
+    int gutter_width;
+} ViewState;
 
-    /* ---- 滚动偏移 ---- */
-    int row_off;                 // 垂直：首个可见行的索引
-    int col_off;                 // 水平：render-space 偏移量
+// 文档状态 — 文本数据、文件信息、修改历史
+typedef struct {
+    char *filename;
+    int num_rows;
+    EditorRow *row;
+    int dirty;
 
-    /* ---- 终端尺寸 ---- */
-    int screen_rows;             // 可视行数
-    int screen_cols;             // 可视列数
+    UndoRecord *undo_stack;
+    int undo_count;
+    int undo_cap;
+    UndoRecord *redo_stack;
+    int redo_count;
+    int redo_cap;
+    int is_action_locked;
+} Document;
 
-    /* ---- 文本数据 ---- */
-    int num_rows;                // 总行数
-    EditorRow *row;              // 行数组（动态分配）
+// 终端底层 — Windows 平台 API 句柄和原始模式备份
+typedef struct {
+    HANDLE hIN, hOUT;
+    int raw_mode;
+    DWORD dwOriginalInMode, dwOriginalOutMode;
+    UINT uOriginalOutputCP, uOriginalInputCP;
+} TerminalState;
 
-    /* ---- 文件状态 ---- */
-    int dirty;                   // >0 表示有未保存修改
-    char *filename;              // 当前文件路径（NULL = 未命名）
+// UI 交互 — 状态栏消息、输入模式、搜索词
+typedef struct {
+    char statusmsg[80];
+    time_t statusmsg_time;
+    int overwrite_mode;
+    char *search_query;
+} UIState;
 
-    /* ---- 状态/消息栏 ---- */
-    char statusmsg[80];          // 底部消息文本
-    time_t statusmsg_time;       // 消息时间戳（5 秒后自动清除）
+// 编辑器设置 — 语法高亮规则和排版偏好
+typedef struct {
+    struct EditorSyntax *syntax;
+    int tab_stop;
+} EditorSettings;
 
-    /* ---- 语法高亮 ---- */
-    struct EditorSyntax *syntax; // 当前语言规则（NULL = 纯文本）
-    char *search_query;          // 搜索关键词（NULL = 无搜索高亮）
+// ============================================================
+//  编辑器根状态（组合上述 5 个子结构）
+// ============================================================
 
-    /* ---- 排版 ---- */
-    int gutter_width;            // 行号栏宽度（动态计算）
-    int tab_stop;                // 当前缩进宽度（来自 syntax 或默认 4）
-
-    int overwrite_mode;          // 0 为插入模式，1 为覆盖模式
-
-    /* ---- 终端模式 ---- */
-    int raw_mode;                // 是否处于原始模式
-    HANDLE hIN;                  // 标准输入句柄
-    HANDLE hOUT;                 // 标准输出句柄
-    DWORD dwOriginalInMode;      // 原始控制台输入模式备份
-    DWORD dwOriginalOutMode;     // 原始控制台输出模式备份
-    UINT  uOriginalOutputCP;     // 原始输出代码页
-    UINT  uOriginalInputCP;      // 原始输入代码页
+typedef struct EditorConfig {
+    ViewState view;
+    Document doc;
+    TerminalState term;
+    UIState ui;
+    EditorSettings settings;
 } EditorConfig;
 
 // ============================================================
@@ -162,10 +182,10 @@ typedef struct {
 enum EditorKeys {
     KEY_NULL = 0,
     KEY_CTRL_C = 3,   KEY_CTRL_D = 4,   KEY_CTRL_F = 6,   KEY_CTRL_G = 7,
-    KEY_CTRL_H = 8,   KEY_CTRL_J = 10,  KEY_CTRL_P = 16,
+    KEY_CTRL_H = 8,   KEY_CTRL_J = 10,  KEY_CTRL_P = 16,  KEY_CTRL_Z = 26,
     KEY_TAB = 9,
     KEY_ENTER = 13,
-    KEY_CTRL_Q = 17,  KEY_CTRL_S = 19,  KEY_CTRL_U = 21,
+    KEY_CTRL_Q = 17,  KEY_CTRL_S = 19,  KEY_CTRL_U = 21,  KEY_CTRL_Y = 25,
     KEY_ESC = 27,
     KEY_BACKSPACE = 127,
 
@@ -180,6 +200,9 @@ enum EditorKeys {
 //  工具函数
 // ============================================================
 
+
+typedef void (*EditorOomHandler)(void);
+void editor_set_oom_handler(EditorOomHandler handler);
 void *editor_safe_realloc(void *ptr, size_t size);
 char *editor_strdup(const char *s);
 int utf8_char_length(unsigned char c);

@@ -13,11 +13,19 @@
 #include "fileio.h"
 #include <stdio.h>
 
+static EditorConfig *g_ec;
+
+static void on_oom(void) {
+    if (g_ec) editor_emergency_save(g_ec);
+}
+
 int main(int argc, char *argv[])
 {
     EditorConfig ec = {0};
+    g_ec = &ec;
+    editor_set_oom_handler(on_oom);
 
-    enable_raw_mode(&ec);
+    enable_raw_mode(&ec.term);
     editor_init(&ec);
 
     editor_set_status_message(&ec, "HELP: Ctrl-S = save | Ctrl-Q = quit");

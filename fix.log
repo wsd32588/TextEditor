@@ -4,7 +4,7 @@ Fix Log - TextEditor Project
 Date      : 2026-05-14 — 2026-05-19
 Author    : Claude Code (AI assistant)
 =========================================================
-Revisions : 19
+Revisions : 20
 
 =========================================================
 Revision 1 — 2026-05-14
@@ -994,3 +994,47 @@ Affected Files
   include/common.h      —  2 行新增
   src/editor.c          —  4 行新增
   src/terminal.c        —  9 行新增
+
+=========================================================
+Revision 20 — 2026-05-19
+=========================================================
+
+Summary
+---------------------------------------------------------
+EditorConfig 拆分为 5 个子结构体：ViewState / Document /
+TerminalState / UIState / EditorSettings，按关注点解耦。
+---------------------------------------------------------
+Detail
+---------------------------------------------------------
+
+[1] include/common.h — EditorConfig 从平面 30 字段 god struct
+    拆分为 5 个嵌套子结构体
+    Before : typedef struct { cursor_x, cursor_y, ..., uOriginalInputCP } EditorConfig;
+    After  : ViewState (光标/滚动/屏幕), Document (行数据/文件/undo栈),
+             TerminalState (句柄/原始模式), UIState (状态栏/搜索/覆盖),
+             EditorSettings (语法/缩进) — EditorConfig 仅组合以上 5 个
+    Why    : EditorConfig 膨胀为 "god struct"，终端句柄和语法高亮
+             配置混在一起，每个函数都拿到全部状态。拆分后各模块
+             可通过子结构体只访问自己关心的数据，为后续进一步
+             缩小函数签名（只传子结构体而非整个 EditorConfig）铺路。
+
+[2] 7 个源文件 — 机械替换所有 ec->field → ec->sub.field
+    Changed : ec->cursor_x → ec->view.cursor_x
+              ec->filename  → ec->doc.filename
+              ec->hIN/hOUT  → ec->term.hIN/hOUT
+              ec->statusmsg → ec->ui.statusmsg
+              ec->syntax    → ec->settings.syntax
+              ...共 30 个字段全部重定向
+    Why    : 纯机械重构，编译器保证零遗漏。
+
+Affected Files
+---------------------------------------------------------
+  include/common.h      —  结构体重写（-68 行 +75 行）
+  include/editor.h      —  无变更（仅函数声明）
+  src/Main/main.c       —  4 处字段访问替换
+  src/terminal.c        —  12 处字段访问替换
+  src/render.c          —  30+ 处字段访问替换
+  src/editor.c          —  80+ 处字段访问替换
+  src/input.c           —  20+ 处字段访问替换
+  src/syntax.c          —  10+ 处字段访问替换
+  src/fileio.c          —  15+ 处字段访问替换
